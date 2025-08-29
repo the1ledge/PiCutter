@@ -2,10 +2,10 @@ import sys
 import serial.tools.list_ports
 import re
 import time
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout,
                                QProgressBar, QFileDialog, QTextEdit)
-from PySide6.QtCore import Qt, QThread, QObject, Signal, QTimer
+from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer
 
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
