@@ -96,16 +96,16 @@ class MainWindow(QMainWindow):
         control_dro_layout.addWidget(jog_group)
 
         # DRO Group
-        dro_group = QGroupBox("Digital Readout (Work Pos)")
+        dro_group = QGroupBox("Digital Readout (Machine Pos)")
         dro_layout = QGridLayout()
-        self.x_pos_label = QLabel("X: 0.000")
-        self.y_pos_label = QLabel("Y: 0.000")
-        self.z_pos_label = QLabel("Z: 0.000")
-        dro_layout.addWidget(QLabel("WPos X:"), 0, 0)
+        self.x_pos_label = QLabel("0.000")
+        self.y_pos_label = QLabel("0.000")
+        self.z_pos_label = QLabel("0.000")
+        dro_layout.addWidget(QLabel("MPos X:"), 0, 0)
         dro_layout.addWidget(self.x_pos_label, 0, 1)
-        dro_layout.addWidget(QLabel("WPos Y:"), 1, 0)
+        dro_layout.addWidget(QLabel("MPos Y:"), 1, 0)
         dro_layout.addWidget(self.y_pos_label, 1, 1)
-        dro_layout.addWidget(QLabel("WPos Z:"), 2, 0)
+        dro_layout.addWidget(QLabel("MPos Z:"), 2, 0)
         dro_layout.addWidget(self.z_pos_label, 2, 1)
         dro_group.setLayout(dro_layout)
         control_dro_layout.addWidget(dro_group)
@@ -202,9 +202,9 @@ class MainWindow(QMainWindow):
 
     def handle_serial_data(self, data):
         self.console_output.append(f"RX: {data}")
-        # Example GRBL status: <Idle|WPos:10.123,5.456,0.000|FS:0,0|WCO:0,0,0>
+        # Example GRBL status: <Idle|MPos:0.000,0.000,0.000|FS:0,0>
         if data.startswith("<"):
-            match = re.search(r"WPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
+            match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
             if match:
                 x, y, z = match.groups()
                 self.x_pos_label.setText(f"{float(x):.3f}")
