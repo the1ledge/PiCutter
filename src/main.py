@@ -2,11 +2,12 @@ import sys
 import serial.tools.list_ports
 import re
 import time
+import os
 from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout,
-                               QProgressBar, QFileDialog, QTextEdit, QLineEdit)
+                               QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget,
+                               QMessageBox, QFormLayout)
 from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings
-from .settings import SettingsDialog
 
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
@@ -24,7 +25,6 @@ class SerialWorker(QObject):
                     if line:
                         self.serial_data_received.emit(line)
                 except serial.SerialException:
-                    # Port might have been closed
                     break
         print("Serial worker finished.")
 
@@ -36,164 +36,202 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GRBL CNC Controller")
-        self.resize(800, 600)
+        self.setWindowTitle("PiGRBL CNC Controller")
+        self.resize(800, 480)
 
-        # Main widget and layout
+        self.settings = QSettings("MyCompany", "PiGRBLCNC")
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Emergency Stop Button
+        # --- Top Bar ---
+        top_bar_layout = QHBoxLayout()
         self.e_stop_button = QPushButton("EMERGENCY STOP")
         self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
         self.e_stop_button.setFixedHeight(40)
-        main_layout.addWidget(self.e_stop_button)
+        top_bar_layout.addWidget(self.e_stop_button)
 
-        # Connection UI
+        connection_group = QGroupBox("Connection")
         connection_layout = QHBoxLayout()
         self.port_combobox = QComboBox()
         self.refresh_button = QPushButton("Refresh")
         self.connect_button = QPushButton("Connect")
         self.status_label = QLabel("Status: Disconnected")
-
         connection_layout.addWidget(QLabel("Port:"))
         connection_layout.addWidget(self.port_combobox)
-
         connection_layout.addWidget(QLabel("Baud:"))
         self.baud_combobox = QComboBox()
         self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
         self.baud_combobox.setCurrentText("115200")
         connection_layout.addWidget(self.baud_combobox)
-
         connection_layout.addWidget(self.refresh_button)
         connection_layout.addWidget(self.connect_button)
-
-        self.settings_button = QPushButton("Settings")
-        connection_layout.addWidget(self.settings_button)
-
-        connection_layout.addStretch()
         connection_layout.addWidget(self.status_label)
+        connection_group.setLayout(connection_layout)
+        top_bar_layout.addWidget(connection_group)
 
-        main_layout.addLayout(connection_layout)
+        top_bar_layout.addStretch()
 
-        # --- Control and DRO ---
-        control_dro_layout = QHBoxLayout()
+        system_buttons_layout = QVBoxLayout()
+        self.exit_button = QPushButton("Exit Application")
+        self.shutdown_button = QPushButton("Shutdown Pi")
+        system_buttons_layout.addWidget(self.exit_button)
+        system_buttons_layout.addWidget(self.shutdown_button)
+        top_bar_layout.addLayout(system_buttons_layout)
+        main_layout.addLayout(top_bar_layout)
 
-        # Jogging Group
-        jog_group = QGroupBox("Manual Control (Jogging)")
+        # --- Main Tabs ---
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+        self.build_manual_control_tab()
+        self.build_gcode_tab()
+        self.build_console_tab()
+        self.build_settings_tab()
+
+        # --- Connections ---
+        self.connect_signals()
+
+        # --- Initial State ---
+        self.serial_connection = None
+        self.serial_thread = None
+        self.serial_worker = None
+        self.gcode_lines = []
+        self.gcode_current_line = 0
+        self.gcode_is_running = False
+        self.gcode_is_paused = False
+        self.populate_ports()
+        self.update_ui_states()
+
+        self.dro_timer = QTimer(self)
+        self.dro_timer.setInterval(200)
+        self.dro_timer.timeout.connect(lambda: self.send_command("?"))
+
+    def build_manual_control_tab(self):
+        manual_tab = QWidget()
+        manual_layout = QHBoxLayout(manual_tab)
+        self.tabs.addTab(manual_tab, "Manual Control")
+
+        jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
-
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
-        self.step_size_combo.setCurrentText("10")
-
-        jog_layout.addWidget(QLabel("Step Size (mm):"), 0, 0, 1, 2)
-        jog_layout.addWidget(self.step_size_combo, 0, 2, 1, 2)
-
-        self.y_plus_button = QPushButton("Y+")
-        self.y_minus_button = QPushButton("Y-")
-        self.x_minus_button = QPushButton("X-")
-        self.x_plus_button = QPushButton("X+")
-        self.z_plus_button = QPushButton("Z+")
-        self.z_minus_button = QPushButton("Z-")
-
+        jog_layout.addWidget(QLabel("Step (mm):"), 0, 0)
+        jog_layout.addWidget(self.step_size_combo, 0, 1)
+        self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
+        self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
+        self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
         jog_layout.addWidget(self.y_plus_button, 1, 1)
         jog_layout.addWidget(self.y_minus_button, 3, 1)
         jog_layout.addWidget(self.x_minus_button, 2, 0)
         jog_layout.addWidget(self.x_plus_button, 2, 2)
         jog_layout.addWidget(self.z_plus_button, 1, 3)
         jog_layout.addWidget(self.z_minus_button, 3, 3)
-
         jog_group.setLayout(jog_layout)
-        control_dro_layout.addWidget(jog_group)
+        manual_layout.addWidget(jog_group)
 
-        # DRO Group
-        dro_group = QGroupBox("Digital Readout (Machine Pos)")
-        dro_layout = QGridLayout()
-        self.x_pos_label = QLabel("0.000")
-        self.y_pos_label = QLabel("0.000")
-        self.z_pos_label = QLabel("0.000")
-        dro_layout.addWidget(QLabel("MPos X:"), 0, 0)
-        dro_layout.addWidget(self.x_pos_label, 0, 1)
-        dro_layout.addWidget(QLabel("MPos Y:"), 1, 0)
-        dro_layout.addWidget(self.y_pos_label, 1, 1)
-        dro_layout.addWidget(QLabel("MPos Z:"), 2, 0)
-        dro_layout.addWidget(self.z_pos_label, 2, 1)
+        dro_group = QGroupBox("DRO (Machine Pos)")
+        dro_layout = QFormLayout()
+        self.x_pos_label, self.y_pos_label, self.z_pos_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
+        dro_layout.addRow("X:", self.x_pos_label)
+        dro_layout.addRow("Y:", self.y_pos_label)
+        dro_layout.addRow("Z:", self.z_pos_label)
         dro_group.setLayout(dro_layout)
-        control_dro_layout.addWidget(dro_group)
+        manual_layout.addWidget(dro_group)
 
+        manual_right_col_layout = QVBoxLayout()
         actions_group = QGroupBox("Actions")
         actions_layout = QVBoxLayout()
-        self.home_button = QPushButton("Home ($H)")
-        self.unlock_button = QPushButton("Unlock ($X)")
-        self.set_zero_button = QPushButton("Set Zero (G10)")
-        self.run_probe_button = QPushButton("Run Probing Cycle")
+        self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
+        self.set_zero_button, self.run_probe_button = QPushButton("Set Zero (G10)"), QPushButton("Run Probing Cycle")
         actions_layout.addWidget(self.home_button)
         actions_layout.addWidget(self.unlock_button)
         actions_layout.addWidget(self.set_zero_button)
         actions_layout.addWidget(self.run_probe_button)
         actions_group.setLayout(actions_layout)
-        control_dro_layout.addWidget(actions_group)
+        manual_right_col_layout.addWidget(actions_group)
 
-        spindle_group = QGroupBox("Spindle Control")
-        spindle_layout = QGridLayout()
+        spindle_group = QGroupBox("Spindle")
+        spindle_layout = QFormLayout()
         self.spindle_speed_input = QLineEdit("1000")
-        self.spindle_on_button = QPushButton("Spindle On (M3)")
-        self.spindle_off_button = QPushButton("Spindle Off (M5)")
-        spindle_layout.addWidget(QLabel("Speed (RPM):"), 0, 0)
-        spindle_layout.addWidget(self.spindle_speed_input, 0, 1)
-        spindle_layout.addWidget(self.spindle_on_button, 1, 0)
-        spindle_layout.addWidget(self.spindle_off_button, 1, 1)
+        self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
+        spindle_layout.addRow("Speed (RPM):", self.spindle_speed_input)
+        spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
-        control_dro_layout.addWidget(spindle_group)
+        manual_right_col_layout.addWidget(spindle_group)
+        manual_layout.addLayout(manual_right_col_layout)
 
-        main_layout.addLayout(control_dro_layout)
+    def build_gcode_tab(self):
+        gcode_tab = QWidget()
+        gcode_layout = QVBoxLayout(gcode_tab)
+        self.tabs.addTab(gcode_tab, "G-Code Sender")
 
-        # G-Code Sending Group
-        gcode_group = QGroupBox("G-Code Sending")
-        gcode_layout = QVBoxLayout()
-
+        gcode_group = QGroupBox("G-Code File")
+        gcode_group_layout = QVBoxLayout()
         gcode_file_layout = QHBoxLayout()
         self.load_file_button = QPushButton("Load File")
         self.gcode_file_label = QLabel("No file loaded.")
         gcode_file_layout.addWidget(self.load_file_button)
-        gcode_file_layout.addWidget(self.gcode_file_label)
-        gcode_file_layout.addStretch()
-
+        gcode_file_layout.addWidget(self.gcode_file_label, 1)
         self.gcode_progress = QProgressBar()
-
         gcode_actions_layout = QHBoxLayout()
-        self.start_button = QPushButton("Start")
-        self.pause_button = QPushButton("Pause")
-        self.stop_button = QPushButton("Stop")
+        self.start_button, self.pause_button, self.stop_button = QPushButton("Start"), QPushButton("Pause"), QPushButton("Stop")
         gcode_actions_layout.addWidget(self.start_button)
         gcode_actions_layout.addWidget(self.pause_button)
         gcode_actions_layout.addWidget(self.stop_button)
         gcode_actions_layout.addStretch()
+        gcode_group_layout.addLayout(gcode_file_layout)
+        gcode_group_layout.addWidget(self.gcode_progress)
+        gcode_group_layout.addLayout(gcode_actions_layout)
+        gcode_group.setLayout(gcode_group_layout)
+        gcode_layout.addWidget(gcode_group)
+        gcode_layout.addStretch()
 
-        gcode_layout.addLayout(gcode_file_layout)
-        gcode_layout.addWidget(self.gcode_progress)
-        gcode_layout.addLayout(gcode_actions_layout)
-        gcode_group.setLayout(gcode_layout)
-
-        main_layout.addWidget(gcode_group)
-
-        # Console Group
-        console_group = QGroupBox("Console")
-        console_layout = QVBoxLayout()
+    def build_console_tab(self):
+        console_tab = QWidget()
+        console_layout = QVBoxLayout(console_tab)
+        self.tabs.addTab(console_tab, "Console")
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         console_layout.addWidget(self.console_output)
-        console_group.setLayout(console_layout)
 
-        main_layout.addWidget(console_group)
-        main_layout.addStretch() # Add a spacer
+    def build_settings_tab(self):
+        self.settings_tab = QWidget()
+        self.tabs.addTab(self.settings_tab, "Settings")
+        layout = QVBoxLayout(self.settings_tab)
 
-        # --- Connections ---
+        probe_group = QGroupBox("Probe Settings")
+        probe_layout = QFormLayout()
+        self.probe_dist_input, self.probe_feed_input, self.probe_thickness_input = QLineEdit(), QLineEdit(), QLineEdit()
+        probe_layout.addRow("Probe Travel (mm):", self.probe_dist_input)
+        probe_layout.addRow("Probe Feed Rate:", self.probe_feed_input)
+        probe_layout.addRow("Probe Thickness (mm):", self.probe_thickness_input)
+        probe_group.setLayout(probe_layout)
+        layout.addWidget(probe_group)
+
+        self.initial_grbl_settings = {}
+        grbl_group = QGroupBox("GRBL Settings")
+        grbl_layout = QFormLayout()
+        read_button = QPushButton("Read Settings From Machine")
+        read_button.clicked.connect(lambda: self.send_command("$$"))
+        grbl_layout.addWidget(read_button)
+        self.max_spindle_speed_input, self.x_accel_input, self.y_accel_input, self.z_accel_input = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
+        grbl_layout.addRow("Max Spindle ($30):", self.max_spindle_speed_input)
+        grbl_layout.addRow("X Accel ($120):", self.x_accel_input)
+        grbl_layout.addRow("Y Accel ($121):", self.y_accel_input)
+        grbl_layout.addRow("Z Accel ($122):", self.z_accel_input)
+        grbl_group.setLayout(grbl_layout)
+        layout.addWidget(grbl_group)
+
+        save_button = QPushButton("Save All Settings")
+        save_button.clicked.connect(self.save_settings)
+        layout.addWidget(save_button)
+        layout.addStretch()
+        self.load_settings()
+
+    def connect_signals(self):
         self.refresh_button.clicked.connect(self.populate_ports)
         self.connect_button.clicked.connect(self.toggle_connection)
-
         self.x_plus_button.clicked.connect(lambda: self.send_jog_command("X", 1))
         self.x_minus_button.clicked.connect(lambda: self.send_jog_command("X", -1))
         self.y_plus_button.clicked.connect(lambda: self.send_jog_command("Y", 1))
@@ -207,34 +245,16 @@ class MainWindow(QMainWindow):
         self.home_button.clicked.connect(lambda: self.send_command("$H"))
         self.unlock_button.clicked.connect(lambda: self.send_command("$X"))
         self.set_zero_button.clicked.connect(lambda: self.send_command("G10 L20 P1 X0 Y0 Z0"))
-        self.e_stop_button.clicked.connect(self.emergency_stop)
+        self.run_probe_button.clicked.connect(self.run_probe_cycle)
         self.spindle_on_button.clicked.connect(self.spindle_on)
         self.spindle_off_button.clicked.connect(lambda: self.send_command("M5"))
-        self.run_probe_button.clicked.connect(self.run_probe_cycle)
-        self.settings_button.clicked.connect(self.open_settings_dialog)
-
-        # --- State ---
-        self.serial_connection = None
-        self.serial_thread = None
-        self.serial_worker = None
-
-        # G-code state
-        self.gcode_lines = []
-        self.gcode_current_line = 0
-        self.gcode_is_running = False
-        self.gcode_is_paused = False
-
-        self.populate_ports()
-        self.update_ui_states()
-
-        # --- DRO Timer ---
-        self.dro_timer = QTimer(self)
-        self.dro_timer.setInterval(200) # 200ms update rate
-        self.dro_timer.timeout.connect(lambda: self.send_command("?"))
+        self.exit_button.clicked.connect(self.close)
+        self.shutdown_button.clicked.connect(self.shutdown_pi)
+        self.e_stop_button.clicked.connect(self.emergency_stop)
+        self.grbl_setting_received.connect(self.update_grbl_setting)
 
     def handle_serial_data(self, data):
         self.console_output.append(f"RX: {data}")
-        # Example GRBL status: <Idle|MPos:0.000,0.000,0.000|FS:0,0>
         if data.startswith("<"):
             match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
             if match:
@@ -245,21 +265,17 @@ class MainWindow(QMainWindow):
         elif data.lower() == "ok":
             self.send_next_gcode_line()
         elif data.startswith("$"):
-            # This is a GRBL setting response
             parts = data.split("=")
             if len(parts) == 2:
                 self.grbl_setting_received.emit(parts[0], parts[1])
         elif data.startswith("[PRB:"):
-            # Successful probe, now set the Z-zero based on probe thickness
-            settings = QSettings("MyCompany", "PiGRBLCNC")
-            probe_thickness = settings.value("probe/thickness", 1.0)
+            probe_thickness = float(self.settings.value("probe/thickness", 1.0))
             self.send_command(f"G10 L20 P1 Z{probe_thickness}")
             self.console_output.append(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
 
     def run_probe_cycle(self):
-        settings = QSettings("MyCompany", "PiGRBLCNC")
-        probe_dist = settings.value("probe/distance", -25)
-        probe_feed = settings.value("probe/feedrate", 100)
+        probe_dist = self.settings.value("probe/distance", -25)
+        probe_feed = self.settings.value("probe/feedrate", 100)
         self.send_command(f"G38.2 Z{probe_dist} F{probe_feed}")
 
     def load_gcode_file(self):
@@ -276,24 +292,17 @@ class MainWindow(QMainWindow):
     def update_ui_states(self):
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
         file_loaded = bool(self.gcode_lines)
-
-        # G-code buttons
         self.start_button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
         self.pause_button.setEnabled(is_connected and self.gcode_is_running)
         self.stop_button.setEnabled(is_connected and self.gcode_is_running)
-
-        # Action buttons
         self.home_button.setEnabled(is_connected)
         self.unlock_button.setEnabled(is_connected)
         self.set_zero_button.setEnabled(is_connected)
         self.e_stop_button.setEnabled(is_connected)
-
-        # Spindle controls
         self.spindle_on_button.setEnabled(is_connected)
         self.spindle_off_button.setEnabled(is_connected)
         self.spindle_speed_input.setEnabled(is_connected)
         self.run_probe_button.setEnabled(is_connected)
-
         if self.gcode_is_running and not self.gcode_is_paused:
             self.pause_button.setText("Pause")
         else:
@@ -310,18 +319,15 @@ class MainWindow(QMainWindow):
     def pause_gcode(self):
         if not self.gcode_is_running:
             return
-
         self.gcode_is_paused = not self.gcode_is_paused
         if self.gcode_is_paused:
-            self.send_command("!") # Feed hold
+            self.send_command("!")
         else:
-            self.send_command("~") # Resume
+            self.send_command("~")
         self.update_ui_states()
 
     def emergency_stop(self):
-        # The soft-reset command immediately halts GRBL
         self.send_command("\x18")
-        # Also reset the internal state of the G-code sender
         self.gcode_is_running = False
         self.gcode_is_paused = False
         self.gcode_current_line = 0
@@ -333,12 +339,12 @@ class MainWindow(QMainWindow):
             speed = int(self.spindle_speed_input.text())
             self.send_command(f"M3 S{speed}")
         except ValueError:
-            self.console_output.append("INFO: Invalid spindle speed. Please enter a number.")
+            self.console_output.append("INFO: Invalid spindle speed.")
 
     def stop_gcode(self):
         self.gcode_is_running = False
         self.gcode_is_paused = False
-        self.send_command("\x18") # Soft-reset
+        self.send_command("\x18")
         self.gcode_current_line = 0
         self.gcode_progress.setValue(0)
         self.update_ui_states()
@@ -346,33 +352,26 @@ class MainWindow(QMainWindow):
     def send_next_gcode_line(self):
         if not self.gcode_is_running or self.gcode_is_paused:
             return
-
         if self.gcode_current_line < len(self.gcode_lines):
             line = self.gcode_lines[self.gcode_current_line]
             self.send_command(line)
             self.gcode_progress.setValue(self.gcode_current_line + 1)
             self.gcode_current_line += 1
         else:
-            # End of file
             self.gcode_is_running = False
             self.update_ui_states()
-            print("G-code sending finished.")
+            self.console_output.append("INFO: G-code sending finished.")
 
     def send_command(self, command):
         if self.serial_connection and self.serial_connection.is_open:
             self.console_output.append(f"TX: {command}")
-            # GRBL expects a newline character to execute a command
             self.serial_connection.write((command + '\n').encode('utf-8'))
         else:
             self.console_output.append(f"INFO: Not connected. Command '{command}' not sent.")
 
     def send_jog_command(self, axis, direction):
-        step_size = float(self.step_size_combo.currentText())
-        distance = step_size * direction
-        # Using the new GRBL jogging command $J=
-        # G91 sets relative mode, G21 sets units to mm
-        # F sets the feed rate (speed). Let's use a default value for now.
-        command = f"$J=G91 G21 {axis}{distance} F1000"
+        step = float(self.step_size_combo.currentText())
+        command = f"$J=G91 G21 {axis}{step * direction} F1000"
         self.send_command(command)
 
     def populate_ports(self):
@@ -393,34 +392,23 @@ class MainWindow(QMainWindow):
         if not port:
             self.status_label.setText("Status: No port selected")
             return
-
         try:
             self.serial_connection = serial.Serial(port, baud, timeout=1)
-
-            # Wake up GRBL
             self.serial_connection.write(b"\r\n\r\n")
-            time.sleep(2) # Wait for GRBL to initialize
+            time.sleep(2)
             self.serial_connection.flushInput()
-
             self.serial_thread = QThread()
             self.serial_worker = SerialWorker(self.serial_connection)
             self.serial_worker.moveToThread(self.serial_thread)
-
             self.serial_thread.started.connect(self.serial_worker.run)
             self.serial_worker.serial_data_received.connect(self.handle_serial_data)
-
             self.serial_thread.start()
             self.dro_timer.start()
-
             self.status_label.setText(f"Status: Connected to {port}")
             self.connect_button.setText("Disconnect")
-            self.port_combobox.setEnabled(False)
-            self.baud_combobox.setEnabled(False)
-            self.refresh_button.setEnabled(False)
-            self.update_ui_states()
-
         except (serial.SerialException, FileNotFoundError) as e:
             self.status_label.setText(f"Status: Error - {e}")
+        self.update_ui_states()
 
     def disconnect_serial(self):
         self.dro_timer.stop()
@@ -428,36 +416,59 @@ class MainWindow(QMainWindow):
             self.serial_worker.stop()
             self.serial_thread.quit()
             self.serial_thread.wait()
-
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
-
         self.status_label.setText("Status: Disconnected")
         self.connect_button.setText("Connect")
-        self.port_combobox.setEnabled(True)
-        self.baud_combobox.setEnabled(True)
-        self.refresh_button.setEnabled(True)
         self.serial_connection = None
         self.serial_thread = None
         self.serial_worker = None
         self.update_ui_states()
 
-    def open_settings_dialog(self):
-        dialog = SettingsDialog(self)
-        # Connect signals and slots for communication
-        dialog.read_grbl_settings.connect(lambda: self.send_command("$$"))
-        dialog.write_grbl_setting.connect(self.send_command)
-        self.grbl_setting_received.connect(dialog.update_grbl_setting)
+    def load_settings(self):
+        self.probe_dist_input.setText(self.settings.value("probe/distance", "-25"))
+        self.probe_feed_input.setText(self.settings.value("probe/feedrate", "100"))
+        self.probe_thickness_input.setText(self.settings.value("probe/thickness", "1.0"))
 
-        dialog.exec_()
+    def save_settings(self):
+        self.settings.setValue("probe/distance", self.probe_dist_input.text())
+        self.settings.setValue("probe/feedrate", self.probe_feed_input.text())
+        self.settings.setValue("probe/thickness", self.probe_thickness_input.text())
+        grbl_fields = {
+            "$30": self.max_spindle_speed_input,
+            "$120": self.x_accel_input,
+            "$121": self.y_accel_input,
+            "$122": self.z_accel_input,
+        }
+        for setting, field in grbl_fields.items():
+            initial_value = self.initial_grbl_settings.get(setting)
+            current_value = field.text()
+            if initial_value is not None and current_value != initial_value:
+                self.send_command(f"{setting}={current_value}")
+        self.console_output.append("INFO: Settings saved.")
 
-        # The connection is automatically broken when the dialog is destroyed.
-        # Manually disconnecting can cause issues if the dialog is opened again.
+    def update_grbl_setting(self, setting, value):
+        self.initial_grbl_settings[setting] = value
+        if setting == "$30":
+            self.max_spindle_speed_input.setText(value)
+        elif setting == "$120":
+            self.x_accel_input.setText(value)
+        elif setting == "$121":
+            self.y_accel_input.setText(value)
+        elif setting == "$122":
+            self.z_accel_input.setText(value)
+
+    def shutdown_pi(self):
+        reply = QMessageBox.question(self, 'Confirm Shutdown',
+                                     "Are you sure you want to shut down the Raspberry Pi?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.console_output.append("INFO: Shutting down Raspberry Pi.")
+            os.system("sudo shutdown -h now")
 
     def closeEvent(self, event):
         self.disconnect_serial()
         super().closeEvent(event)
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
