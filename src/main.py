@@ -54,22 +54,15 @@ class MainWindow(QMainWindow):
 
         connection_group = QGroupBox("Connection")
         connection_layout = QHBoxLayout()
-        self.port_combobox = QComboBox()
-        self.refresh_button = QPushButton("Refresh")
         self.connect_button = QPushButton("Connect")
-        self.status_label = QLabel("Status: Disconnected")
-        connection_layout.addWidget(QLabel("Port:"))
-        connection_layout.addWidget(self.port_combobox)
-        connection_layout.addWidget(QLabel("Baud:"))
-        self.baud_combobox = QComboBox()
-        self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
-        self.baud_combobox.setCurrentText("115200")
-        connection_layout.addWidget(self.baud_combobox)
-        connection_layout.addWidget(self.refresh_button)
         connection_layout.addWidget(self.connect_button)
-        connection_layout.addWidget(self.status_label)
         connection_group.setLayout(connection_layout)
         top_bar_layout.addWidget(connection_group)
+
+        self.connection_status_indicator = QPushButton("Disconnected")
+        self.connection_status_indicator.setCheckable(False)
+        self.connection_status_indicator.setEnabled(False) # Make it non-interactive
+        top_bar_layout.addWidget(self.connection_status_indicator)
 
         top_bar_layout.addStretch()
 
@@ -100,12 +93,23 @@ class MainWindow(QMainWindow):
         self.gcode_current_line = 0
         self.gcode_is_running = False
         self.gcode_is_paused = False
+        self.machine_state = "Unknown"
         self.populate_ports()
         self.update_ui_states()
 
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
+
+        self.home_pulse_timer = QTimer(self)
+        self.home_pulse_timer.setInterval(500)
+        self.home_pulse_timer.timeout.connect(self.pulse_home_button)
+        self.home_pulse_state = 0
+
+        self.alarm_pulse_timer = QTimer(self)
+        self.alarm_pulse_timer.setInterval(500)
+        self.alarm_pulse_timer.timeout.connect(self.pulse_alarm_button)
+        self.alarm_pulse_state = 0
 
     def build_manual_control_tab(self):
         manual_tab = QWidget()
@@ -121,6 +125,11 @@ class MainWindow(QMainWindow):
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
+
+        for button in [self.y_plus_button, self.y_minus_button, self.x_minus_button,
+                       self.x_plus_button, self.z_plus_button, self.z_minus_button]:
+            button.setMinimumSize(60, 60) # Make buttons larger for touch
+
         jog_layout.addWidget(self.y_plus_button, 1, 1)
         jog_layout.addWidget(self.y_minus_button, 3, 1)
         jog_layout.addWidget(self.x_minus_button, 2, 0)
@@ -200,6 +209,19 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.settings_tab, "Settings")
         layout = QVBoxLayout(self.settings_tab)
 
+        connection_settings_group = QGroupBox("Serial Connection")
+        connection_settings_layout = QFormLayout()
+        self.port_combobox = QComboBox()
+        self.baud_combobox = QComboBox()
+        self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.baud_combobox.setCurrentText("115200")
+        self.refresh_button = QPushButton("Refresh Port List")
+        connection_settings_layout.addRow("Port:", self.port_combobox)
+        connection_settings_layout.addRow("Baud Rate:", self.baud_combobox)
+        connection_settings_layout.addRow(self.refresh_button)
+        connection_settings_group.setLayout(connection_settings_layout)
+        layout.addWidget(connection_settings_group)
+
         probe_group = QGroupBox("Probe Settings")
         probe_layout = QFormLayout()
         self.probe_dist_input, self.probe_feed_input, self.probe_thickness_input = QLineEdit(), QLineEdit(), QLineEdit()
@@ -256,6 +278,15 @@ class MainWindow(QMainWindow):
     def handle_serial_data(self, data):
         self.console_output.append(f"RX: {data}")
         if data.startswith("<"):
+            # Extract machine state
+            state_match = re.search(r"<(\w+)", data)
+            if state_match:
+                new_state = state_match.group(1)
+                if new_state != self.machine_state:
+                    self.machine_state = new_state
+                    self.update_ui_states() # Update UI when state changes
+
+            # Extract position
             match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
             if match:
                 x, y, z = match.groups()
@@ -307,6 +338,23 @@ class MainWindow(QMainWindow):
             self.pause_button.setText("Pause")
         else:
             self.pause_button.setText("Resume")
+
+        # Handle button animations based on machine state
+        if self.machine_state == "Home":
+            self.home_pulse_timer.start()
+        else:
+            self.home_pulse_timer.stop()
+            # Set final color after homing or if not homing
+            if "WCO" in self.console_output.toPlainText(): # A simple way to check if homing has been done
+                 self.home_button.setStyleSheet("background-color: lightgreen;")
+            else:
+                 self.home_button.setStyleSheet("") # Reset to default
+
+        if self.machine_state == "Alarm":
+            self.alarm_pulse_timer.start()
+        else:
+            self.alarm_pulse_timer.stop()
+            self.unlock_button.setStyleSheet("") # Reset to default
 
     def start_gcode(self):
         if self.gcode_lines:
@@ -404,26 +452,51 @@ class MainWindow(QMainWindow):
             self.serial_worker.serial_data_received.connect(self.handle_serial_data)
             self.serial_thread.start()
             self.dro_timer.start()
-            self.status_label.setText(f"Status: Connected to {port}")
             self.connect_button.setText("Disconnect")
+            self.update_connection_indicator(True)
         except (serial.SerialException, FileNotFoundError) as e:
-            self.status_label.setText(f"Status: Error - {e}")
+            self.console_output.append(f"ERROR: Failed to connect - {e}")
+            self.update_connection_indicator(False)
         self.update_ui_states()
 
     def disconnect_serial(self):
         self.dro_timer.stop()
+        self.update_connection_indicator(False)
         if self.serial_thread and self.serial_thread.isRunning():
             self.serial_worker.stop()
             self.serial_thread.quit()
             self.serial_thread.wait()
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
-        self.status_label.setText("Status: Disconnected")
         self.connect_button.setText("Connect")
         self.serial_connection = None
         self.serial_thread = None
         self.serial_worker = None
         self.update_ui_states()
+
+    def pulse_home_button(self):
+        if self.home_pulse_state == 0:
+            self.home_button.setStyleSheet("background-color: #4CAF50; color: white;") # Green
+            self.home_pulse_state = 1
+        else:
+            self.home_button.setStyleSheet("background-color: #8BC34A; color: white;") # Lighter Green
+            self.home_pulse_state = 0
+
+    def pulse_alarm_button(self):
+        if self.alarm_pulse_state == 0:
+            self.unlock_button.setStyleSheet("background-color: #F44336; color: white;") # Red
+            self.alarm_pulse_state = 1
+        else:
+            self.unlock_button.setStyleSheet("background-color: #FF7043; color: white;") # Lighter Red
+            self.alarm_pulse_state = 0
+
+    def update_connection_indicator(self, is_connected):
+        if is_connected:
+            self.connection_status_indicator.setText("Connected")
+            self.connection_status_indicator.setStyleSheet("background-color: green; color: white; font-weight: bold;")
+        else:
+            self.connection_status_indicator.setText("Disconnected")
+            self.connection_status_indicator.setStyleSheet("background-color: red; color: white; font-weight: bold;")
 
     def load_settings(self):
         self.probe_dist_input.setText(self.settings.value("probe/distance", "-25"))
