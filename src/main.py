@@ -4,8 +4,9 @@ import re
 import time
 from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout,
-                               QProgressBar, QFileDialog, QTextEdit)
-from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer
+                               QProgressBar, QFileDialog, QTextEdit, QLineEdit)
+from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings
+from src.settings import SettingsDialog
 
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
@@ -31,6 +32,8 @@ class SerialWorker(QObject):
         self._is_running = False
 
 class MainWindow(QMainWindow):
+    grbl_setting_received = Signal(str, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GRBL CNC Controller")
@@ -40,6 +43,12 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+
+        # Emergency Stop Button
+        self.e_stop_button = QPushButton("EMERGENCY STOP")
+        self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self.e_stop_button.setFixedHeight(40)
+        main_layout.addWidget(self.e_stop_button)
 
         # Connection UI
         connection_layout = QHBoxLayout()
@@ -59,6 +68,10 @@ class MainWindow(QMainWindow):
 
         connection_layout.addWidget(self.refresh_button)
         connection_layout.addWidget(self.connect_button)
+
+        self.settings_button = QPushButton("Settings")
+        connection_layout.addWidget(self.settings_button)
+
         connection_layout.addStretch()
         connection_layout.addWidget(self.status_label)
 
@@ -115,11 +128,25 @@ class MainWindow(QMainWindow):
         self.home_button = QPushButton("Home ($H)")
         self.unlock_button = QPushButton("Unlock ($X)")
         self.set_zero_button = QPushButton("Set Zero (G10)")
+        self.run_probe_button = QPushButton("Run Probing Cycle")
         actions_layout.addWidget(self.home_button)
         actions_layout.addWidget(self.unlock_button)
         actions_layout.addWidget(self.set_zero_button)
+        actions_layout.addWidget(self.run_probe_button)
         actions_group.setLayout(actions_layout)
         control_dro_layout.addWidget(actions_group)
+
+        spindle_group = QGroupBox("Spindle Control")
+        spindle_layout = QGridLayout()
+        self.spindle_speed_input = QLineEdit("1000")
+        self.spindle_on_button = QPushButton("Spindle On (M3)")
+        self.spindle_off_button = QPushButton("Spindle Off (M5)")
+        spindle_layout.addWidget(QLabel("Speed (RPM):"), 0, 0)
+        spindle_layout.addWidget(self.spindle_speed_input, 0, 1)
+        spindle_layout.addWidget(self.spindle_on_button, 1, 0)
+        spindle_layout.addWidget(self.spindle_off_button, 1, 1)
+        spindle_group.setLayout(spindle_layout)
+        control_dro_layout.addWidget(spindle_group)
 
         main_layout.addLayout(control_dro_layout)
 
@@ -180,6 +207,11 @@ class MainWindow(QMainWindow):
         self.home_button.clicked.connect(lambda: self.send_command("$H"))
         self.unlock_button.clicked.connect(lambda: self.send_command("$X"))
         self.set_zero_button.clicked.connect(lambda: self.send_command("G10 L20 P1 X0 Y0 Z0"))
+        self.e_stop_button.clicked.connect(self.emergency_stop)
+        self.spindle_on_button.clicked.connect(self.spindle_on)
+        self.spindle_off_button.clicked.connect(lambda: self.send_command("M5"))
+        self.run_probe_button.clicked.connect(self.run_probe_cycle)
+        self.settings_button.clicked.connect(self.open_settings_dialog)
 
         # --- State ---
         self.serial_connection = None
@@ -212,6 +244,23 @@ class MainWindow(QMainWindow):
                 self.z_pos_label.setText(f"{float(z):.3f}")
         elif data.lower() == "ok":
             self.send_next_gcode_line()
+        elif data.startswith("$"):
+            # This is a GRBL setting response
+            parts = data.split("=")
+            if len(parts) == 2:
+                self.grbl_setting_received.emit(parts[0], parts[1])
+        elif data.startswith("[PRB:"):
+            # Successful probe, now set the Z-zero based on probe thickness
+            settings = QSettings("MyCompany", "PiGRBLCNC")
+            probe_thickness = settings.value("probe/thickness", 1.0)
+            self.send_command(f"G10 L20 P1 Z{probe_thickness}")
+            self.console_output.append(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
+
+    def run_probe_cycle(self):
+        settings = QSettings("MyCompany", "PiGRBLCNC")
+        probe_dist = settings.value("probe/distance", -25)
+        probe_feed = settings.value("probe/feedrate", 100)
+        self.send_command(f"G38.2 Z{probe_dist} F{probe_feed}")
 
     def load_gcode_file(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Load G-Code File", "", "G-Code Files (*.gcode *.nc);;All Files (*)")
@@ -237,6 +286,13 @@ class MainWindow(QMainWindow):
         self.home_button.setEnabled(is_connected)
         self.unlock_button.setEnabled(is_connected)
         self.set_zero_button.setEnabled(is_connected)
+        self.e_stop_button.setEnabled(is_connected)
+
+        # Spindle controls
+        self.spindle_on_button.setEnabled(is_connected)
+        self.spindle_off_button.setEnabled(is_connected)
+        self.spindle_speed_input.setEnabled(is_connected)
+        self.run_probe_button.setEnabled(is_connected)
 
         if self.gcode_is_running and not self.gcode_is_paused:
             self.pause_button.setText("Pause")
@@ -261,6 +317,23 @@ class MainWindow(QMainWindow):
         else:
             self.send_command("~") # Resume
         self.update_ui_states()
+
+    def emergency_stop(self):
+        # The soft-reset command immediately halts GRBL
+        self.send_command("\x18")
+        # Also reset the internal state of the G-code sender
+        self.gcode_is_running = False
+        self.gcode_is_paused = False
+        self.gcode_current_line = 0
+        self.gcode_progress.setValue(0)
+        self.update_ui_states()
+
+    def spindle_on(self):
+        try:
+            speed = int(self.spindle_speed_input.text())
+            self.send_command(f"M3 S{speed}")
+        except ValueError:
+            self.console_output.append("INFO: Invalid spindle speed. Please enter a number.")
 
     def stop_gcode(self):
         self.gcode_is_running = False
@@ -368,6 +441,18 @@ class MainWindow(QMainWindow):
         self.serial_thread = None
         self.serial_worker = None
         self.update_ui_states()
+
+    def open_settings_dialog(self):
+        dialog = SettingsDialog(self)
+        # Connect signals and slots for communication
+        dialog.read_grbl_settings.connect(lambda: self.send_command("$$"))
+        dialog.write_grbl_setting.connect(self.send_command)
+        self.grbl_setting_received.connect(dialog.update_grbl_setting)
+
+        dialog.exec_()
+
+        # The connection is automatically broken when the dialog is destroyed.
+        # Manually disconnecting can cause issues if the dialog is opened again.
 
     def closeEvent(self, event):
         self.disconnect_serial()
