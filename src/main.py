@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(manual_tab, "Manual Control")
         top_layout = QHBoxLayout(manual_tab)
         left_v_layout = QVBoxLayout()
+        left_v_layout.setAlignment(Qt.AlignTop)
         dro_group = QGroupBox("DRO (Machine Pos)")
         dro_layout = QFormLayout()
         self.x_pos_label, self.y_pos_label, self.z_pos_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
@@ -104,13 +105,13 @@ class MainWindow(QMainWindow):
         dro_group.setLayout(dro_layout)
         left_v_layout.addWidget(dro_group)
         actions_group = QGroupBox("Actions")
-        actions_layout = QVBoxLayout()
+        actions_layout = QGridLayout()
         self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
         self.set_zero_button, self.run_probe_button = QPushButton("Set Zero (G10)"), QPushButton("Run Probing Cycle")
-        actions_layout.addWidget(self.home_button)
-        actions_layout.addWidget(self.unlock_button)
-        actions_layout.addWidget(self.set_zero_button)
-        actions_layout.addWidget(self.run_probe_button)
+        actions_layout.addWidget(self.home_button, 0, 0)
+        actions_layout.addWidget(self.unlock_button, 0, 1)
+        actions_layout.addWidget(self.set_zero_button, 1, 0)
+        actions_layout.addWidget(self.run_probe_button, 1, 1)
         actions_group.setLayout(actions_layout)
         left_v_layout.addWidget(actions_group)
         spindle_group = QGroupBox("Spindle")
@@ -121,27 +122,26 @@ class MainWindow(QMainWindow):
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
         left_v_layout.addWidget(spindle_group)
-        left_v_layout.addStretch()
+        top_layout.addLayout(left_v_layout)
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
-        jog_layout.setSpacing(2)
+        jog_layout.setSpacing(5)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
-        jog_layout.addWidget(QLabel("Step (mm):"), 0, 0, 1, 3)
-        jog_layout.addWidget(self.step_size_combo, 1, 0, 1, 3)
+        jog_layout.addWidget(QLabel("Step (mm):"), 0, 0, 1, 2)
+        jog_layout.addWidget(self.step_size_combo, 0, 2, 1, 2)
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
         for button in [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]:
-            button.setMinimumSize(50, 50)
-        jog_layout.addWidget(self.y_plus_button, 2, 1)
-        jog_layout.addWidget(self.x_minus_button, 3, 0)
-        jog_layout.addWidget(self.x_plus_button, 3, 2)
-        jog_layout.addWidget(self.y_minus_button, 4, 1)
-        jog_layout.addWidget(self.z_plus_button, 2, 3)
-        jog_layout.addWidget(self.z_minus_button, 4, 3)
+            button.setMinimumSize(60, 60)
+        jog_layout.addWidget(self.y_plus_button, 1, 1)
+        jog_layout.addWidget(self.x_minus_button, 2, 0)
+        jog_layout.addWidget(self.x_plus_button, 2, 2)
+        jog_layout.addWidget(self.y_minus_button, 3, 1)
+        jog_layout.addWidget(self.z_plus_button, 1, 3)
+        jog_layout.addWidget(self.z_minus_button, 3, 3)
         jog_group.setLayout(jog_layout)
-        top_layout.addLayout(left_v_layout)
         top_layout.addWidget(jog_group)
 
     def build_gcode_tab(self):
@@ -303,7 +303,9 @@ class MainWindow(QMainWindow):
         self.home_button.setStyleSheet("")
         self.unlock_button.setStyleSheet("")
 
-        if not is_connected: self.is_homed = False
+        if not is_connected:
+            self.is_homed = False
+            self.machine_state = "Unknown"
 
         if self.machine_state == "Alarm":
             self.console_output.append("DIAG: Alarm state detected. Starting pulsation.")
@@ -311,11 +313,12 @@ class MainWindow(QMainWindow):
         elif self.machine_state == "Home":
             self.console_output.append("DIAG: Home state detected. Starting pulsation.")
             self.home_pulse_timer.start()
-        else:
+        else: # Idle, Run, Jog etc.
             if self.home_pulse_timer.isActive():
                 self.console_output.append("INFO: Homing cycle finished.")
                 self.is_homed = True
-            if self.is_homed: self.home_button.setStyleSheet("background-color: lightgreen;")
+            if self.is_homed:
+                self.home_button.setStyleSheet("background-color: lightgreen;")
 
     def start_gcode(self):
         if self.gcode_lines:
