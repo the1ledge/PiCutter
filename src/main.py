@@ -31,6 +31,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("PiGRBL CNC Controller")
         self.resize(800, 480)
+        QApplication.setStyle("Fusion")
         self.settings = QSettings("MyCompany", "PiGRBLCNC")
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -123,7 +124,7 @@ class MainWindow(QMainWindow):
         left_v_layout.addStretch()
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
-        jog_layout.setSpacing(5)
+        jog_layout.setSpacing(2)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         jog_layout.addWidget(QLabel("Step (mm):"), 0, 0, 1, 3)
@@ -280,10 +281,11 @@ class MainWindow(QMainWindow):
         filepath, _ = QFileDialog.getOpenFileName(self, "Load G-Code", "", "*.gcode *.nc;;*.*")
         if filepath:
             with open(filepath, 'r') as f:
-                self.gcode_lines = [line.strip() for line in f if line.strip() and not line.startswith(';')]
+                self.gcode_lines = [line.strip() for line in f if line.strip() and not line.strip().startswith(';')]
             self.gcode_file_label.setText(os.path.basename(filepath))
             self.gcode_progress.setMaximum(len(self.gcode_lines))
-            self.gcode_current_line, self.gcode_progress.setValue(0, 0)
+            self.gcode_current_line = 0
+            self.gcode_progress.setValue(0)
             self.update_ui_states()
 
     def update_ui_states(self):
@@ -296,7 +298,6 @@ class MainWindow(QMainWindow):
             button.setEnabled(is_connected)
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
 
-        # State machine for button styles
         self.home_pulse_timer.stop()
         self.alarm_pulse_timer.stop()
         self.home_button.setStyleSheet("")
@@ -310,7 +311,10 @@ class MainWindow(QMainWindow):
         elif self.machine_state == "Home":
             self.console_output.append("DIAG: Home state detected. Starting pulsation.")
             self.home_pulse_timer.start()
-        else: # Idle, Run, Jog etc.
+        else:
+            if self.home_pulse_timer.isActive():
+                self.console_output.append("INFO: Homing cycle finished.")
+                self.is_homed = True
             if self.is_homed: self.home_button.setStyleSheet("background-color: lightgreen;")
 
     def start_gcode(self):
@@ -447,6 +451,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
