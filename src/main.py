@@ -6,7 +6,7 @@ from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout,
                                QProgressBar, QFileDialog, QTextEdit, QLineEdit)
 from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings
-from src.settings import SettingsDialog
+from .settings import SettingsDialog
 
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
