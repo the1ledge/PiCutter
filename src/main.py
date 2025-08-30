@@ -93,9 +93,16 @@ class MainWindow(QMainWindow):
     def build_manual_control_tab(self):
         manual_tab = QWidget()
         self.tabs.addTab(manual_tab, "Manual Control")
+
+        # Main horizontal layout to create two columns
         top_layout = QHBoxLayout(manual_tab)
+
+        # --- LEFT COLUMN ---
+        # This column will hold DRO, Actions, and Spindle controls
         left_v_layout = QVBoxLayout()
-        left_v_layout.setAlignment(Qt.AlignTop)
+        left_v_layout.setAlignment(Qt.AlignTop) # Align widgets to the top
+
+        # DRO Group
         dro_group = QGroupBox("DRO (Machine Pos)")
         dro_layout = QFormLayout()
         self.x_pos_label, self.y_pos_label, self.z_pos_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
@@ -104,16 +111,20 @@ class MainWindow(QMainWindow):
         dro_layout.addRow("Z:", self.z_pos_label)
         dro_group.setLayout(dro_layout)
         left_v_layout.addWidget(dro_group)
+
+        # Actions Group (using a vertical layout to make it narrower)
         actions_group = QGroupBox("Actions")
-        actions_layout = QGridLayout()
+        actions_layout = QVBoxLayout() # CHANGED: Was QGridLayout, now QVBoxLayout for a narrower column
         self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
         self.set_zero_button, self.run_probe_button = QPushButton("Set Zero (G10)"), QPushButton("Run Probing Cycle")
-        actions_layout.addWidget(self.home_button, 0, 0)
-        actions_layout.addWidget(self.unlock_button, 0, 1)
-        actions_layout.addWidget(self.set_zero_button, 1, 0)
-        actions_layout.addWidget(self.run_probe_button, 1, 1)
+        actions_layout.addWidget(self.home_button)
+        actions_layout.addWidget(self.unlock_button)
+        actions_layout.addWidget(self.set_zero_button)
+        actions_layout.addWidget(self.run_probe_button)
         actions_group.setLayout(actions_layout)
         left_v_layout.addWidget(actions_group)
+
+        # Spindle Group
         spindle_group = QGroupBox("Spindle")
         spindle_layout = QFormLayout()
         self.spindle_speed_input = QLineEdit("1000")
@@ -122,27 +133,46 @@ class MainWindow(QMainWindow):
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
         left_v_layout.addWidget(spindle_group)
+
+        # Add the left column to the main layout
         top_layout.addLayout(left_v_layout)
+
+        # --- RIGHT COLUMN (JOGGING) ---
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
         jog_layout.setSpacing(5)
+        jog_group.setLayout(jog_layout)
+
+        # Step Size Controls
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         jog_layout.addWidget(QLabel("Step (mm):"), 0, 0, 1, 2)
-        jog_layout.addWidget(self.step_size_combo, 0, 2, 1, 2)
+        jog_layout.addWidget(self.step_size_combo, 0, 2, 1, 3)
+
+        # Jog Buttons
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
+
         for button in [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]:
             button.setMinimumSize(60, 60)
-        jog_layout.addWidget(self.y_plus_button, 1, 1)
-        jog_layout.addWidget(self.x_minus_button, 2, 0)
-        jog_layout.addWidget(self.x_plus_button, 2, 2)
-        jog_layout.addWidget(self.y_minus_button, 3, 1)
-        jog_layout.addWidget(self.z_plus_button, 1, 3)
-        jog_layout.addWidget(self.z_minus_button, 3, 3)
-        jog_group.setLayout(jog_layout)
+
+        # CHANGED: Rearranged buttons into the desired cross and vertical stack layout
+        # XY cross formation
+        jog_layout.addWidget(self.y_plus_button, 1, 1)  # Top of the cross
+        jog_layout.addWidget(self.x_minus_button, 2, 0) # Left of the cross
+        jog_layout.addWidget(self.x_plus_button, 2, 2)  # Right of the cross
+        jog_layout.addWidget(self.y_minus_button, 3, 1) # Bottom of the cross
+
+        # Add a spacer column for visual separation before Z buttons
+        jog_layout.setColumnStretch(3, 1)
+
+        # Z buttons, aligned vertically to the right
+        jog_layout.addWidget(self.z_plus_button, 1, 4) # Top right
+        jog_layout.addWidget(self.z_minus_button, 3, 4)# Bottom right
+
         top_layout.addWidget(jog_group)
+        top_layout.addStretch(1)
 
     def build_gcode_tab(self):
         gcode_tab = QWidget()
@@ -291,13 +321,21 @@ class MainWindow(QMainWindow):
     def update_ui_states(self):
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
         file_loaded = bool(self.gcode_lines)
+
+        # Base Enable/Disable Logic
+        for button in [self.start_button, self.pause_button, self.stop_button]:
+            button.setEnabled(is_connected and file_loaded)
+        for button in [self.home_button, self.unlock_button, self.set_zero_button, self.e_stop_button,
+                       self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input, self.run_probe_button]:
+            button.setEnabled(is_connected)
+
+        # G-code running state
         self.start_button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
         self.pause_button.setEnabled(is_connected and self.gcode_is_running)
         self.stop_button.setEnabled(is_connected and self.gcode_is_running)
-        for button in [self.home_button, self.unlock_button, self.set_zero_button, self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input, self.run_probe_button]:
-            button.setEnabled(is_connected)
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
 
+        # State-based Indicator Logic
         self.home_pulse_timer.stop()
         self.alarm_pulse_timer.stop()
         self.home_button.setStyleSheet("")
@@ -310,15 +348,12 @@ class MainWindow(QMainWindow):
         if self.machine_state == "Alarm":
             self.console_output.append("DIAG: Alarm state detected. Starting pulsation.")
             self.alarm_pulse_timer.start()
+            self.is_homed = False # Alarm state resets homing status
         elif self.machine_state == "Home":
             self.console_output.append("DIAG: Home state detected. Starting pulsation.")
             self.home_pulse_timer.start()
-        else: # Idle, Run, Jog etc.
-            if self.home_pulse_timer.isActive():
-                self.console_output.append("INFO: Homing cycle finished.")
-                self.is_homed = True
-            if self.is_homed:
-                self.home_button.setStyleSheet("background-color: lightgreen;")
+        elif self.is_homed:
+            self.home_button.setStyleSheet("background-color: lightgreen;")
 
     def start_gcode(self):
         if self.gcode_lines:
