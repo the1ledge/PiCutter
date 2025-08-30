@@ -56,13 +56,12 @@ class MainWindow(QMainWindow):
         connection_layout = QHBoxLayout()
         self.connect_button = QPushButton("Connect")
         connection_layout.addWidget(self.connect_button)
-        connection_group.setLayout(connection_layout)
-        top_bar_layout.addWidget(connection_group)
-
         self.connection_status_indicator = QPushButton("Disconnected")
         self.connection_status_indicator.setCheckable(False)
-        self.connection_status_indicator.setEnabled(False) # Make it non-interactive
-        top_bar_layout.addWidget(self.connection_status_indicator)
+        self.connection_status_indicator.setEnabled(False)
+        connection_layout.addWidget(self.connection_status_indicator)
+        connection_group.setLayout(connection_layout)
+        top_bar_layout.addWidget(connection_group)
 
         top_bar_layout.addStretch()
 
@@ -94,22 +93,24 @@ class MainWindow(QMainWindow):
         self.gcode_is_running = False
         self.gcode_is_paused = False
         self.machine_state = "Unknown"
-        self.populate_ports()
-        self.update_ui_states()
 
+        # --- Timers ---
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
-
         self.home_pulse_timer = QTimer(self)
         self.home_pulse_timer.setInterval(500)
         self.home_pulse_timer.timeout.connect(self.pulse_home_button)
         self.home_pulse_state = 0
-
         self.alarm_pulse_timer = QTimer(self)
         self.alarm_pulse_timer.setInterval(500)
         self.alarm_pulse_timer.timeout.connect(self.pulse_alarm_button)
         self.alarm_pulse_state = 0
+
+        self.populate_ports()
+        self.update_ui_states()
+        self.update_connection_indicator(False)
+
 
     def build_manual_control_tab(self):
         manual_tab = QWidget()
@@ -125,11 +126,9 @@ class MainWindow(QMainWindow):
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
-
         for button in [self.y_plus_button, self.y_minus_button, self.x_minus_button,
                        self.x_plus_button, self.z_plus_button, self.z_minus_button]:
-            button.setMinimumSize(60, 60) # Make buttons larger for touch
-
+            button.setMinimumSize(60, 60)
         jog_layout.addWidget(self.y_plus_button, 1, 1)
         jog_layout.addWidget(self.y_minus_button, 3, 1)
         jog_layout.addWidget(self.x_minus_button, 2, 0)
@@ -174,7 +173,6 @@ class MainWindow(QMainWindow):
         gcode_tab = QWidget()
         gcode_layout = QVBoxLayout(gcode_tab)
         self.tabs.addTab(gcode_tab, "G-Code Sender")
-
         gcode_group = QGroupBox("G-Code File")
         gcode_group_layout = QVBoxLayout()
         gcode_file_layout = QHBoxLayout()
@@ -205,16 +203,15 @@ class MainWindow(QMainWindow):
         console_layout.addWidget(self.console_output)
 
     def build_settings_tab(self):
-        self.settings_tab = QWidget()
-        self.tabs.addTab(self.settings_tab, "Settings")
-        layout = QVBoxLayout(self.settings_tab)
+        settings_tab = QWidget()
+        self.tabs.addTab(settings_tab, "Settings")
+        layout = QVBoxLayout(settings_tab)
 
         connection_settings_group = QGroupBox("Serial Connection")
         connection_settings_layout = QFormLayout()
         self.port_combobox = QComboBox()
         self.baud_combobox = QComboBox()
         self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
-        self.baud_combobox.setCurrentText("115200")
         self.refresh_button = QPushButton("Refresh Port List")
         connection_settings_layout.addRow("Port:", self.port_combobox)
         connection_settings_layout.addRow("Baud Rate:", self.baud_combobox)
@@ -278,15 +275,12 @@ class MainWindow(QMainWindow):
     def handle_serial_data(self, data):
         self.console_output.append(f"RX: {data}")
         if data.startswith("<"):
-            # Extract machine state
             state_match = re.search(r"<(\w+)", data)
             if state_match:
                 new_state = state_match.group(1)
                 if new_state != self.machine_state:
                     self.machine_state = new_state
-                    self.update_ui_states() # Update UI when state changes
-
-            # Extract position
+                    self.update_ui_states()
             match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
             if match:
                 x, y, z = match.groups()
@@ -305,8 +299,8 @@ class MainWindow(QMainWindow):
             self.console_output.append(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
 
     def run_probe_cycle(self):
-        probe_dist = self.settings.value("probe/distance", -25)
-        probe_feed = self.settings.value("probe/feedrate", 100)
+        probe_dist = float(self.settings.value("probe/distance", -25))
+        probe_feed = float(self.settings.value("probe/feedrate", 100))
         self.send_command(f"G38.2 Z{probe_dist} F{probe_feed}")
 
     def load_gcode_file(self):
@@ -315,100 +309,66 @@ class MainWindow(QMainWindow):
             with open(filepath, 'r') as f:
                 self.gcode_lines = [line.strip() for line in f if line.strip() and not line.strip().startswith(';')]
             self.gcode_file_label.setText(filepath.split('/')[-1])
-            self.gcode_current_line = 0
-            self.gcode_progress.setMaximum(len(self.gcode_lines))
-            self.gcode_progress.setValue(0)
+            self.gcode_current_line, self.gcode_progress.setValue(0, 0)
             self.update_ui_states()
 
     def update_ui_states(self):
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
         file_loaded = bool(self.gcode_lines)
-        self.start_button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
+        for button in [self.start_button, self.pause_button, self.stop_button]:
+            button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
         self.pause_button.setEnabled(is_connected and self.gcode_is_running)
-        self.stop_button.setEnabled(is_connected and self.gcode_is_running)
-        self.home_button.setEnabled(is_connected)
-        self.unlock_button.setEnabled(is_connected)
-        self.set_zero_button.setEnabled(is_connected)
-        self.e_stop_button.setEnabled(is_connected)
-        self.spindle_on_button.setEnabled(is_connected)
-        self.spindle_off_button.setEnabled(is_connected)
-        self.spindle_speed_input.setEnabled(is_connected)
-        self.run_probe_button.setEnabled(is_connected)
-        if self.gcode_is_running and not self.gcode_is_paused:
-            self.pause_button.setText("Pause")
-        else:
-            self.pause_button.setText("Resume")
-
-        # Handle button animations based on machine state
-        if self.machine_state == "Home":
-            self.home_pulse_timer.start()
+        for button in [self.home_button, self.unlock_button, self.set_zero_button, self.e_stop_button,
+                       self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input, self.run_probe_button]:
+            button.setEnabled(is_connected)
+        self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
+        if self.machine_state == "Home": self.home_pulse_timer.start()
         else:
             self.home_pulse_timer.stop()
-            # Set final color after homing or if not homing
-            if "WCO" in self.console_output.toPlainText(): # A simple way to check if homing has been done
-                 self.home_button.setStyleSheet("background-color: lightgreen;")
-            else:
-                 self.home_button.setStyleSheet("") # Reset to default
-
-        if self.machine_state == "Alarm":
-            self.alarm_pulse_timer.start()
+            self.home_button.setStyleSheet("background-color: lightgreen;" if "WCO" in self.console_output.toPlainText() else "")
+        if self.machine_state == "Alarm": self.alarm_pulse_timer.start()
         else:
             self.alarm_pulse_timer.stop()
-            self.unlock_button.setStyleSheet("") # Reset to default
+            self.unlock_button.setStyleSheet("")
 
     def start_gcode(self):
         if self.gcode_lines:
-            self.gcode_is_running = True
-            self.gcode_is_paused = False
-            self.gcode_current_line = 0
+            self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = True, False, 0
             self.update_ui_states()
             self.send_next_gcode_line()
 
     def pause_gcode(self):
-        if not self.gcode_is_running:
-            return
-        self.gcode_is_paused = not self.gcode_is_paused
-        if self.gcode_is_paused:
-            self.send_command("!")
-        else:
-            self.send_command("~")
-        self.update_ui_states()
+        if self.gcode_is_running:
+            self.gcode_is_paused = not self.gcode_is_paused
+            self.send_command("!" if self.gcode_is_paused else "~")
+            self.update_ui_states()
 
     def emergency_stop(self):
         self.send_command("\x18")
-        self.gcode_is_running = False
-        self.gcode_is_paused = False
-        self.gcode_current_line = 0
+        self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = False, False, 0
         self.gcode_progress.setValue(0)
         self.update_ui_states()
 
     def spindle_on(self):
-        try:
-            speed = int(self.spindle_speed_input.text())
-            self.send_command(f"M3 S{speed}")
-        except ValueError:
-            self.console_output.append("INFO: Invalid spindle speed.")
+        try: self.send_command(f"M3 S{int(self.spindle_speed_input.text())}")
+        except ValueError: self.console_output.append("INFO: Invalid spindle speed.")
 
     def stop_gcode(self):
-        self.gcode_is_running = False
-        self.gcode_is_paused = False
+        self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = False, False, 0
         self.send_command("\x18")
-        self.gcode_current_line = 0
         self.gcode_progress.setValue(0)
         self.update_ui_states()
 
     def send_next_gcode_line(self):
-        if not self.gcode_is_running or self.gcode_is_paused:
-            return
-        if self.gcode_current_line < len(self.gcode_lines):
-            line = self.gcode_lines[self.gcode_current_line]
-            self.send_command(line)
-            self.gcode_progress.setValue(self.gcode_current_line + 1)
-            self.gcode_current_line += 1
-        else:
-            self.gcode_is_running = False
-            self.update_ui_states()
-            self.console_output.append("INFO: G-code sending finished.")
+        if self.gcode_is_running and not self.gcode_is_paused:
+            if self.gcode_current_line < len(self.gcode_lines):
+                self.send_command(self.gcode_lines[self.gcode_current_line])
+                self.gcode_progress.setValue(self.gcode_current_line + 1)
+                self.gcode_current_line += 1
+            else:
+                self.gcode_is_running = False
+                self.update_ui_states()
+                self.console_output.append("INFO: G-code sending finished.")
 
     def send_command(self, command):
         if self.serial_connection and self.serial_connection.is_open:
@@ -419,31 +379,23 @@ class MainWindow(QMainWindow):
 
     def send_jog_command(self, axis, direction):
         step = float(self.step_size_combo.currentText())
-        command = f"$J=G91 G21 {axis}{step * direction} F1000"
-        self.send_command(command)
+        self.send_command(f"$J=G91 G21 {axis}{step * direction} F1000")
 
     def populate_ports(self):
         self.port_combobox.clear()
-        ports = serial.tools.list_ports.comports()
-        for port in ports:
-            self.port_combobox.addItem(port.device)
+        self.port_combobox.addItems([port.device for port in serial.tools.list_ports.comports()])
 
     def toggle_connection(self):
-        if self.serial_connection and self.serial_connection.is_open:
-            self.disconnect_serial()
-        else:
-            self.connect_serial()
+        if self.serial_connection and self.serial_connection.is_open: self.disconnect_serial()
+        else: self.connect_serial()
 
     def connect_serial(self):
-        port = self.port_combobox.currentText()
-        baud = int(self.baud_combobox.currentText())
-        if not port:
-            self.status_label.setText("Status: No port selected")
-            return
+        port, baud = self.port_combobox.currentText(), int(self.baud_combobox.currentText())
+        if not port: return
         try:
             self.serial_connection = serial.Serial(port, baud, timeout=1)
-            self.serial_connection.write(b"\r\n\r\n")
             time.sleep(2)
+            self.serial_connection.write(b"\r\n\r\n")
             self.serial_connection.flushInput()
             self.serial_thread = QThread()
             self.serial_worker = SerialWorker(self.serial_connection)
@@ -461,82 +413,50 @@ class MainWindow(QMainWindow):
 
     def disconnect_serial(self):
         self.dro_timer.stop()
-        self.update_connection_indicator(False)
-        if self.serial_thread and self.serial_thread.isRunning():
-            self.serial_worker.stop()
-            self.serial_thread.quit()
-            self.serial_thread.wait()
-        if self.serial_connection and self.serial_connection.is_open:
-            self.serial_connection.close()
+        if self.serial_thread: self.serial_worker.stop(); self.serial_thread.quit(); self.serial_thread.wait()
+        if self.serial_connection: self.serial_connection.close()
         self.connect_button.setText("Connect")
-        self.serial_connection = None
-        self.serial_thread = None
-        self.serial_worker = None
+        self.serial_connection = self.serial_thread = self.serial_worker = None
+        self.update_connection_indicator(False)
         self.update_ui_states()
 
     def pulse_home_button(self):
-        if self.home_pulse_state == 0:
-            self.home_button.setStyleSheet("background-color: #4CAF50; color: white;") # Green
-            self.home_pulse_state = 1
-        else:
-            self.home_button.setStyleSheet("background-color: #8BC34A; color: white;") # Lighter Green
-            self.home_pulse_state = 0
+        self.home_pulse_state = 1 - self.home_pulse_state
+        self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;")
 
     def pulse_alarm_button(self):
-        if self.alarm_pulse_state == 0:
-            self.unlock_button.setStyleSheet("background-color: #F44336; color: white;") # Red
-            self.alarm_pulse_state = 1
-        else:
-            self.unlock_button.setStyleSheet("background-color: #FF7043; color: white;") # Lighter Red
-            self.alarm_pulse_state = 0
+        self.alarm_pulse_state = 1 - self.alarm_pulse_state
+        self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state == 0 else '#FF7043'}; color: white;")
 
     def update_connection_indicator(self, is_connected):
-        if is_connected:
-            self.connection_status_indicator.setText("Connected")
-            self.connection_status_indicator.setStyleSheet("background-color: green; color: white; font-weight: bold;")
-        else:
-            self.connection_status_indicator.setText("Disconnected")
-            self.connection_status_indicator.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self.connection_status_indicator.setText("Connected" if is_connected else "Disconnected")
+        self.connection_status_indicator.setStyleSheet(f"background-color: {'green' if is_connected else 'red'}; color: white; font-weight: bold;")
 
     def load_settings(self):
-        self.probe_dist_input.setText(self.settings.value("probe/distance", "-25"))
-        self.probe_feed_input.setText(self.settings.value("probe/feedrate", "100"))
-        self.probe_thickness_input.setText(self.settings.value("probe/thickness", "1.0"))
+        for key, widget in self.get_settings_widgets().items():
+            widget.setText(self.settings.value(key, {"probe/distance": "-25", "probe/feedrate": "100", "probe/thickness": "1.0"}.get(key)))
 
     def save_settings(self):
-        self.settings.setValue("probe/distance", self.probe_dist_input.text())
-        self.settings.setValue("probe/feedrate", self.probe_feed_input.text())
-        self.settings.setValue("probe/thickness", self.probe_thickness_input.text())
-        grbl_fields = {
-            "$30": self.max_spindle_speed_input,
-            "$120": self.x_accel_input,
-            "$121": self.y_accel_input,
-            "$122": self.z_accel_input,
-        }
-        for setting, field in grbl_fields.items():
-            initial_value = self.initial_grbl_settings.get(setting)
-            current_value = field.text()
-            if initial_value is not None and current_value != initial_value:
-                self.send_command(f"{setting}={current_value}")
+        for key, widget in self.get_settings_widgets().items():
+            self.settings.setValue(key, widget.text())
+        for setting, field in self.get_grbl_fields().items():
+            if field.text() != self.initial_grbl_settings.get(setting):
+                self.send_command(f"{setting}={field.text()}")
         self.console_output.append("INFO: Settings saved.")
 
     def update_grbl_setting(self, setting, value):
         self.initial_grbl_settings[setting] = value
-        if setting == "$30":
-            self.max_spindle_speed_input.setText(value)
-        elif setting == "$120":
-            self.x_accel_input.setText(value)
-        elif setting == "$121":
-            self.y_accel_input.setText(value)
-        elif setting == "$122":
-            self.z_accel_input.setText(value)
+        if setting in self.get_grbl_fields():
+            self.get_grbl_fields()[setting].setText(value)
+
+    def get_settings_widgets(self):
+        return {"probe/distance": self.probe_dist_input, "probe/feedrate": self.probe_feed_input, "probe/thickness": self.probe_thickness_input}
+
+    def get_grbl_fields(self):
+        return {"$30": self.max_spindle_speed_input, "$120": self.x_accel_input, "$121": self.y_accel_input, "$122": self.z_accel_input}
 
     def shutdown_pi(self):
-        reply = QMessageBox.question(self, 'Confirm Shutdown',
-                                     "Are you sure you want to shut down the Raspberry Pi?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.console_output.append("INFO: Shutting down Raspberry Pi.")
+        if QMessageBox.question(self, 'Confirm Shutdown', "Are you sure?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
             os.system("sudo shutdown -h now")
 
     def closeEvent(self, event):
