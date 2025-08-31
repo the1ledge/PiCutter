@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         self.gcode_is_paused = False
         self.machine_state = "Unknown"
         self.is_homed = False
+        self.was_unlocked = False
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
@@ -236,7 +237,7 @@ class MainWindow(QMainWindow):
         self.pause_button.clicked.connect(self.pause_gcode)
         self.stop_button.clicked.connect(self.stop_gcode)
         self.home_button.clicked.connect(self.run_homing_cycle)
-        self.unlock_button.clicked.connect(lambda: self.send_command("$X"))
+        self.unlock_button.clicked.connect(self.unlock_machine)
         self.set_zero_button.clicked.connect(lambda: self.send_command("G10 L20 P1 X0 Y0 Z0"))
         self.run_probe_button.clicked.connect(self.run_probe_cycle)
         self.spindle_on_button.clicked.connect(self.spindle_on)
@@ -276,6 +277,10 @@ class MainWindow(QMainWindow):
         probe_feed = float(self.settings.value("probe/feedrate", 100))
         self.send_command(f"G38.2 Z{probe_dist} F{probe_feed}")
 
+    def unlock_machine(self):
+        self.was_unlocked = True
+        self.send_command("$X")
+
     def run_homing_cycle(self):
         self.is_homed = False
         self.send_command("$H")
@@ -308,18 +313,32 @@ class MainWindow(QMainWindow):
 
         if not is_connected:
             self.is_homed = False
+            self.was_unlocked = False
 
         if self.machine_state == "Alarm":
             self.alarm_pulse_timer.start()
             self.is_homed = False
+            self.was_unlocked = False
         elif self.machine_state == "Home":
             self.home_pulse_timer.start()
+            self.was_unlocked = False
         else:
             if self.home_pulse_timer.isActive():
                 self.is_homed = True
 
+            # Set home button state
             if self.is_homed:
+                self.home_button.setText("Homed")
                 self.home_button.setStyleSheet("background-color: lightgreen;")
+            else:
+                self.home_button.setText("Home ($H)")
+
+            # Set unlock button state
+            if self.was_unlocked:
+                self.unlock_button.setText("Unlocked")
+                self.unlock_button.setStyleSheet("background-color: lightgreen;")
+            else:
+                self.unlock_button.setText("Unlock ($X)")
 
     def start_gcode(self):
         if self.gcode_lines:
