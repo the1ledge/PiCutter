@@ -1,32 +1,39 @@
+
 import sys
 import serial.tools.list_ports
 import re
 import time
 import os
-from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout,
-                               QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget,
-                               QMessageBox, QFormLayout)
+from PySide2.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout
+)
 from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings
 
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
+
     def __init__(self, serial_connection):
         super().__init__()
         self.serial_connection = serial_connection
         self._is_running = True
+
     def run(self):
         while self._is_running:
             if self.serial_connection and self.serial_connection.is_open:
                 try:
                     line = self.serial_connection.readline().decode('utf-8').strip()
-                    if line: self.serial_data_received.emit(line)
-                except serial.SerialException: break
+                    if line:
+                        self.serial_data_received.emit(line)
+                except serial.SerialException:
+                    break
         print("Serial worker finished.")
-    def stop(self): self._is_running = False
+
+    def stop(self):
+        self._is_running = False
 
 class MainWindow(QMainWindow):
     grbl_setting_received = Signal(str, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PiGRBL CNC Controller")
@@ -75,7 +82,6 @@ class MainWindow(QMainWindow):
         self.gcode_is_paused = False
         self.machine_state = "Unknown"
         self.is_homed = False
-        self.was_unlocked = False
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
@@ -90,7 +96,6 @@ class MainWindow(QMainWindow):
         self.populate_ports()
         self.update_connection_indicator(False)
         self.update_ui_states()
-
     def build_manual_control_tab(self):
         manual_tab = QWidget()
         self.tabs.addTab(manual_tab, "Manual Control")
@@ -122,31 +127,48 @@ class MainWindow(QMainWindow):
         spindle_layout.addRow("Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
-        left_v_layout.addWidget(spindle_group)
+        #left_v_layout.addWidget(spindle_group)
+        # Spindle group in the middle
+        spindle_middle_layout = QVBoxLayout()
+        spindle_middle_layout.addWidget(spindle_group)
+        spindle_middle_layout.addStretch(1)
+        top_layout.addLayout(spindle_middle_layout)
+        
         top_layout.addLayout(left_v_layout)
+        
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
         jog_layout.setSpacing(0)
         jog_group.setLayout(jog_layout)
-        jog_group.layout().setContentsMargins(2, 5, 2, 2)
+        jog_group.layout().setContentsMargins(10,10,10,10)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         jog_layout.addWidget(QLabel("Step (mm):"), 0, 0, 1, 2)
-        jog_layout.addWidget(self.step_size_combo, 0, 2, 1, 2)
+        jog_layout.addWidget(self.step_size_combo, 0, 2, 1, 1)
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
         for button in [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]:
-            button.setMinimumSize(55, 55)
-        jog_layout.addWidget(self.y_plus_button, 1, 1)
-        jog_layout.addWidget(self.x_minus_button, 2, 0)
-        jog_layout.addWidget(self.x_plus_button, 2, 2)
-        jog_layout.addWidget(self.y_minus_button, 3, 1)
-        jog_layout.addWidget(self.z_plus_button, 1, 3)
-        jog_layout.addWidget(self.z_minus_button, 3, 3)
-        jog_layout.setColumnStretch(4, 1)
-        top_layout.addWidget(jog_group)
+            button.setMinimumSize(60, 60)
+        
+        jog_layout.addWidget(self.x_minus_button, 2, 1)
+        jog_layout.addWidget(self.x_plus_button, 2, 3)
+        jog_layout.addWidget(self.y_minus_button, 3, 2)
+        jog_layout.addWidget(self.y_plus_button, 1, 2)
+        jog_layout.addWidget(self.z_plus_button, 1, 4)
+        jog_layout.addWidget(self.z_minus_button, 3, 4)
+        jog_layout.setColumnStretch(5, 1)
+        jog_layout.setColumnStretch(0, 1)
+        jog_layout.setRowStretch(5, 1)
+        jog_layout.setRowStretch(0, 1)
+        #top_layout.addWidget(jog_group)
         top_layout.addStretch(1)
+        #move spindle to right
+        right_v_layout = QVBoxLayout()
+        right_v_layout.addWidget(jog_group)
+        #right_v_layout.addWidget(spindle_group)
+        right_v_layout.addStretch(1)
+        top_layout.addLayout(right_v_layout)
 
     def build_gcode_tab(self):
         gcode_tab = QWidget()
@@ -190,6 +212,7 @@ class MainWindow(QMainWindow):
         self.port_combobox = QComboBox()
         self.baud_combobox = QComboBox()
         self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.baud_combobox.setCurrentText("115200")
         self.refresh_button = QPushButton("Refresh Port List")
         connection_settings_layout.addRow("Port:", self.port_combobox)
         connection_settings_layout.addRow("Baud Rate:", self.baud_combobox)
@@ -237,7 +260,7 @@ class MainWindow(QMainWindow):
         self.pause_button.clicked.connect(self.pause_gcode)
         self.stop_button.clicked.connect(self.stop_gcode)
         self.home_button.clicked.connect(self.run_homing_cycle)
-        self.unlock_button.clicked.connect(self.unlock_machine)
+        self.unlock_button.clicked.connect(lambda: self.send_command("$X"))
         self.set_zero_button.clicked.connect(lambda: self.send_command("G10 L20 P1 X0 Y0 Z0"))
         self.run_probe_button.clicked.connect(self.run_probe_cycle)
         self.spindle_on_button.clicked.connect(self.spindle_on)
@@ -250,6 +273,11 @@ class MainWindow(QMainWindow):
     def handle_serial_data(self, data):
         self.console_output.append(f"RX: {data}")
         if data.startswith("<"):
+            # Check for homing complete
+            if data.startswith("<Home"):
+                self.home_pulse_timer.stop()
+                self.is_homed = True
+                #self.home_button.setStyleSheet("background-color: darkgreen; color: black; border-width: 2px; border-style: solid; border-color: black;")
             state_match = re.search(r"<(\w+)", data)
             if state_match:
                 new_state = state_match.group(1)
@@ -277,12 +305,9 @@ class MainWindow(QMainWindow):
         probe_feed = float(self.settings.value("probe/feedrate", 100))
         self.send_command(f"G38.2 Z{probe_dist} F{probe_feed}")
 
-    def unlock_machine(self):
-        self.was_unlocked = True
-        self.send_command("$X")
-
     def run_homing_cycle(self):
         self.is_homed = False
+        self.home_pulse_timer.start()
         self.send_command("$H")
 
     def load_gcode_file(self):
@@ -313,32 +338,19 @@ class MainWindow(QMainWindow):
 
         if not is_connected:
             self.is_homed = False
-            self.was_unlocked = False
 
         if self.machine_state == "Alarm":
             self.alarm_pulse_timer.start()
             self.is_homed = False
-            self.was_unlocked = False
         elif self.machine_state == "Home":
             self.home_pulse_timer.start()
-            self.was_unlocked = False
         else:
             if self.home_pulse_timer.isActive():
                 self.is_homed = True
 
-            # Set home button state
             if self.is_homed:
-                self.home_button.setText("Homed")
-                self.home_button.setStyleSheet("background-color: lightgreen;")
-            else:
-                self.home_button.setText("Home ($H)")
-
-            # Set unlock button state
-            if self.was_unlocked:
-                self.unlock_button.setText("Unlocked")
-                self.unlock_button.setStyleSheet("background-color: lightgreen;")
-            else:
-                self.unlock_button.setText("Unlock ($X)")
+                #self.home_button.setText("Homed" if is_homed else "Home")
+                self.home_button.setStyleSheet("background-color: green; font-weight: bold;")
 
     def start_gcode(self):
         if self.gcode_lines:
@@ -428,7 +440,7 @@ class MainWindow(QMainWindow):
 
     def pulse_home_button(self):
         self.home_pulse_state = 1 - self.home_pulse_state
-        self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;")
+        self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;") #
 
     def pulse_alarm_button(self):
         self.alarm_pulse_state = 1 - self.alarm_pulse_state
@@ -468,7 +480,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.disconnect_serial()
         super().closeEvent(event)
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
