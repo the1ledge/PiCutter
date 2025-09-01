@@ -278,7 +278,7 @@ class MainWindow(QMainWindow):
                 self.home_pulse_timer.stop()
                 self.is_homed = True
                 #self.home_button.setStyleSheet("background-color: darkgreen; color: black; border-width: 2px; border-style: solid; border-color: black;")
-            state_match = re.search(r"<(\w+)", data)
+            state_match = re.search(r"<([^|:]+)", data)
             if state_match:
                 new_state = state_match.group(1)
                 if new_state != self.machine_state:
@@ -307,6 +307,7 @@ class MainWindow(QMainWindow):
 
     def run_homing_cycle(self):
         self.is_homed = False
+        self.home_button.setText("Homing")
         self.home_pulse_timer.start()
         self.send_command("$H")
 
@@ -339,18 +340,26 @@ class MainWindow(QMainWindow):
         if not is_connected:
             self.is_homed = False
 
+        # --- HOME BUTTON ---
+        if self.machine_state == "Home":
+            self.home_pulse_timer.start()
+        else:
+            if self.is_homed:
+                self.home_button.setText("Homed")
+                self.home_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
+            else:
+                self.home_button.setText("Home ($H)")
+
+        # --- UNLOCK BUTTON ---
         if self.machine_state == "Alarm":
             self.alarm_pulse_timer.start()
             self.is_homed = False
-        elif self.machine_state == "Home":
-            self.home_pulse_timer.start()
         else:
-            if self.home_pulse_timer.isActive():
-                self.is_homed = True
-
-            if self.is_homed:
-                #self.home_button.setText("Homed" if is_homed else "Home")
-                self.home_button.setStyleSheet("background-color: green; font-weight: bold;")
+            if is_connected:
+                self.unlock_button.setText("No Alarms")
+                self.unlock_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
+            else:
+                self.unlock_button.setText("Unlock ($X)")
 
     def start_gcode(self):
         if self.gcode_lines:
@@ -439,10 +448,12 @@ class MainWindow(QMainWindow):
         self.update_ui_states()
 
     def pulse_home_button(self):
+        self.home_button.setText("Homing")
         self.home_pulse_state = 1 - self.home_pulse_state
         self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;") #
 
     def pulse_alarm_button(self):
+        self.unlock_button.setText("Unlocking")
         self.alarm_pulse_state = 1 - self.alarm_pulse_state
         self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state == 0 else '#FF7043'}; color: white;")
 
