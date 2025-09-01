@@ -1,13 +1,14 @@
-# v0.9.1
+# v0.10.1
 import sys
 import serial.tools.list_ports
 import re
 import time
 import os
 from PySide2.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox
 )
 from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings
+from PySide2.QtGui import QTextCursor
 
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
@@ -216,9 +217,20 @@ class MainWindow(QMainWindow):
         console_tab = QWidget()
         console_layout = QVBoxLayout(console_tab)
         self.tabs.addTab(console_tab, "Console")
+        input_layout = QHBoxLayout()
+        self.command_input = QLineEdit()
+        self.send_button = QPushButton("Send")
+        self.filter_ok_checkbox = QCheckBox("Filter ok/?")
+        self.filter_pos_checkbox = QCheckBox("Filter position")
+        input_layout.addWidget(self.command_input, 1)
+        input_layout.addWidget(self.send_button)
+        input_layout.addWidget(self.filter_ok_checkbox)
+        input_layout.addWidget(self.filter_pos_checkbox)
+        input_layout.addStretch(1)
+        console_layout.addLayout(input_layout)
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
-        console_layout.addWidget(self.console_output)
+        console_layout.addWidget(self.console_output, 1)
 
     def build_settings_tab(self):
         settings_tab = QWidget()
@@ -286,9 +298,19 @@ class MainWindow(QMainWindow):
         self.shutdown_button.clicked.connect(self.shutdown_pi)
         self.e_stop_button.clicked.connect(self.emergency_stop)
         self.grbl_setting_received.connect(self.update_grbl_setting)
+        self.send_button.clicked.connect(self.send_console_command)
+        self.command_input.returnPressed.connect(self.send_console_command)
+
+    def log_to_console(self, message):
+        if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'):
+            return
+        if self.filter_pos_checkbox.isChecked() and message.startswith('RX: <') and 'MPos:' in message:
+            return
+        self.console_output.moveCursor(QTextCursor.Start)
+        self.console_output.insertPlainText(message + '\n')
 
     def handle_serial_data(self, data):
-        self.console_output.append(f"RX: {data}")
+        self.log_to_console(f"RX: {data}")
         if data.startswith("<"):
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
@@ -328,7 +350,7 @@ class MainWindow(QMainWindow):
         elif data.startswith("[PRB:"):
             probe_thickness = float(self.settings.value("probe/thickness", 1.0))
             self.send_command(f"G10 L20 P1 Z{probe_thickness}")
-            self.console_output.append(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
+            self.log_to_console(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
 
     def run_probe_cycle(self):
         probe_dist = float(self.settings.value("probe/distance", -25))
@@ -420,7 +442,7 @@ class MainWindow(QMainWindow):
 
     def spindle_on(self):
         try: self.send_command(f"M3 S{int(self.spindle_speed_input.text())}")
-        except ValueError: self.console_output.append("INFO: Invalid spindle speed.")
+        except ValueError: self.log_to_console("INFO: Invalid spindle speed.")
 
     def stop_gcode(self):
         self.emergency_stop()
@@ -434,14 +456,20 @@ class MainWindow(QMainWindow):
             else:
                 self.gcode_is_running = False
                 self.update_ui_states()
-                self.console_output.append("INFO: G-code sending finished.")
+                self.log_to_console("INFO: G-code sending finished.")
 
     def send_command(self, command):
         if self.serial_connection and self.serial_connection.is_open:
-            self.console_output.append(f"TX: {command}")
+            self.log_to_console(f"TX: {command}")
             self.serial_connection.write((command + '\n').encode('utf-8'))
         else:
-            self.console_output.append(f"INFO: Not connected. Command '{command}' not sent.")
+            self.log_to_console(f"INFO: Not connected. Command '{command}' not sent.")
+
+    def send_console_command(self):
+        command = self.command_input.text()
+        if command:
+            self.send_command(command)
+            self.command_input.clear()
 
     def send_jog_command(self, axis, direction):
         step = float(self.step_size_combo.currentText())
@@ -473,7 +501,7 @@ class MainWindow(QMainWindow):
             self.connect_button.setText("Disconnect")
             self.update_connection_indicator(True)
         except (serial.SerialException, FileNotFoundError) as e:
-            self.console_output.append(f"ERROR: Failed to connect - {e}")
+            self.log_to_console(f"ERROR: Failed to connect - {e}")
             self.update_connection_indicator(False)
         self.update_ui_states()
 
@@ -510,7 +538,7 @@ class MainWindow(QMainWindow):
         for setting, field in self.get_grbl_fields().items():
             if field.text() != self.initial_grbl_settings.get(setting, ''):
                 self.send_command(f"{setting}={field.text()}")
-        self.console_output.append("INFO: Settings saved.")
+        self.log_to_console("INFO: Settings saved.")
 
     def update_grbl_setting(self, setting, value):
         self.initial_grbl_settings[setting] = value
