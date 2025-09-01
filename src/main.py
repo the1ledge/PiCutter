@@ -1,4 +1,4 @@
-
+# v0.9.1
 import sys
 import serial.tools.list_ports
 import re
@@ -82,6 +82,8 @@ class MainWindow(QMainWindow):
         self.gcode_is_paused = False
         self.machine_state = "Unknown"
         self.is_homed = False
+        self.is_work_zeroed = False
+        self.wco_x, self.wco_y, self.wco_z = 0.0, 0.0, 0.0
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
@@ -96,30 +98,16 @@ class MainWindow(QMainWindow):
         self.populate_ports()
         self.update_connection_indicator(False)
         self.update_ui_states()
+
     def build_manual_control_tab(self):
         manual_tab = QWidget()
         self.tabs.addTab(manual_tab, "Manual Control")
-        top_layout = QHBoxLayout(manual_tab)
-        left_v_layout = QVBoxLayout()
-        left_v_layout.setAlignment(Qt.AlignTop)
-        dro_group = QGroupBox("DRO (Machine Pos)")
-        dro_layout = QFormLayout()
-        self.x_pos_label, self.y_pos_label, self.z_pos_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
-        dro_layout.addRow("X:", self.x_pos_label)
-        dro_layout.addRow("Y:", self.y_pos_label)
-        dro_layout.addRow("Z:", self.z_pos_label)
-        dro_group.setLayout(dro_layout)
-        left_v_layout.addWidget(dro_group)
-        actions_group = QGroupBox("Actions")
-        actions_layout = QVBoxLayout()
-        self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
-        self.set_zero_button, self.run_probe_button = QPushButton("Set Zero (G10)"), QPushButton("Run Probing Cycle")
-        actions_layout.addWidget(self.home_button)
-        actions_layout.addWidget(self.unlock_button)
-        actions_layout.addWidget(self.set_zero_button)
-        actions_layout.addWidget(self.run_probe_button)
-        actions_group.setLayout(actions_layout)
-        left_v_layout.addWidget(actions_group)
+        main_layout = QHBoxLayout(manual_tab)
+
+        # --- Left Column (Spindle & Actions) ---
+        left_column_layout = QVBoxLayout()
+        left_column_layout.setAlignment(Qt.AlignTop)
+
         spindle_group = QGroupBox("Spindle")
         spindle_layout = QFormLayout()
         self.spindle_speed_input = QLineEdit("1000")
@@ -127,14 +115,47 @@ class MainWindow(QMainWindow):
         spindle_layout.addRow("Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
-        #left_v_layout.addWidget(spindle_group)
-        # Spindle group in the middle
-        spindle_middle_layout = QVBoxLayout()
-        spindle_middle_layout.addWidget(spindle_group)
-        spindle_middle_layout.addStretch(1)
-        top_layout.addLayout(spindle_middle_layout)
+        left_column_layout.addWidget(spindle_group)
+
+        actions_group = QGroupBox("Actions")
+        actions_layout = QVBoxLayout()
+        self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
+        self.set_zero_button, self.run_probe_button = QPushButton("Set Zero (G10)"), QPushButton("Run Probing Cycle")
+        actions_layout.addWidget(self.home_button)
+        actions_layout.addWidget(self.unlock_button)
+        actions_layout.addWidget(self.run_probe_button)
+        actions_layout.addWidget(self.set_zero_button)
+        actions_group.setLayout(actions_layout)
+        left_column_layout.addWidget(actions_group)
         
-        top_layout.addLayout(left_v_layout)
+        main_layout.addLayout(left_column_layout)
+
+        # --- Middle Column (DROs) ---
+        middle_column_layout = QVBoxLayout()
+        middle_column_layout.setAlignment(Qt.AlignTop)
+
+        dro_group = QGroupBox("DRO (Machine Pos)")
+        dro_layout = QFormLayout()
+        self.x_pos_label, self.y_pos_label, self.z_pos_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
+        dro_layout.addRow("X:", self.x_pos_label)
+        dro_layout.addRow("Y:", self.y_pos_label)
+        dro_layout.addRow("Z:", self.z_pos_label)
+        dro_group.setLayout(dro_layout)
+        middle_column_layout.addWidget(dro_group)
+
+        wpos_dro_group = QGroupBox("DRO (Work Pos)")
+        wpos_dro_layout = QFormLayout()
+        self.wpos_x_label, self.wpos_y_label, self.wpos_z_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
+        wpos_dro_layout.addRow("X:", self.wpos_x_label)
+        wpos_dro_layout.addRow("Y:", self.wpos_y_label)
+        wpos_dro_layout.addRow("Z:", self.wpos_z_label)
+        wpos_dro_group.setLayout(wpos_dro_layout)
+        middle_column_layout.addWidget(wpos_dro_group)
+
+        main_layout.addLayout(middle_column_layout)
+
+        # --- Right Column (Jogging) ---
+        right_column_layout = QVBoxLayout()
         
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
@@ -161,14 +182,10 @@ class MainWindow(QMainWindow):
         jog_layout.setColumnStretch(0, 1)
         jog_layout.setRowStretch(5, 1)
         jog_layout.setRowStretch(0, 1)
-        #top_layout.addWidget(jog_group)
-        top_layout.addStretch(1)
-        #move spindle to right
-        right_v_layout = QVBoxLayout()
-        right_v_layout.addWidget(jog_group)
-        #right_v_layout.addWidget(spindle_group)
-        right_v_layout.addStretch(1)
-        top_layout.addLayout(right_v_layout)
+
+        right_column_layout.addWidget(jog_group)
+        right_column_layout.addStretch(1)
+        main_layout.addLayout(right_column_layout)
 
     def build_gcode_tab(self):
         gcode_tab = QWidget()
@@ -273,23 +290,36 @@ class MainWindow(QMainWindow):
     def handle_serial_data(self, data):
         self.console_output.append(f"RX: {data}")
         if data.startswith("<"):
-            # Check for homing complete
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
                 self.is_homed = True
-                #self.home_button.setStyleSheet("background-color: darkgreen; color: black; border-width: 2px; border-style: solid; border-color: black;")
+
             state_match = re.search(r"<([^|:]+)", data)
             if state_match:
                 new_state = state_match.group(1)
                 if new_state != self.machine_state:
                     self.machine_state = new_state
                     self.update_ui_states()
+
             pos_match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
             if pos_match:
-                x, y, z = pos_match.groups()
-                self.x_pos_label.setText(f"{float(x):.3f}")
-                self.y_pos_label.setText(f"{float(y):.3f}")
-                self.z_pos_label.setText(f"{float(z):.3f}")
+                mpos_x, mpos_y, mpos_z = (float(c) for c in pos_match.groups())
+                self.x_pos_label.setText(f"{mpos_x:.3f}")
+                self.y_pos_label.setText(f"{mpos_y:.3f}")
+                self.z_pos_label.setText(f"{mpos_z:.3f}")
+
+                wco_match = re.search(r"WCO:([\d.-]+),([\d.-]+),([\d.-]+)", data)
+                if wco_match:
+                    self.wco_x, self.wco_y, self.wco_z = (float(c) for c in wco_match.groups())
+                    self.is_work_zeroed = True
+
+                wpos_x = mpos_x - self.wco_x
+                wpos_y = mpos_y - self.wco_y
+                wpos_z = mpos_z - self.wco_z
+                self.wpos_x_label.setText(f"{wpos_x:.3f}")
+                self.wpos_y_label.setText(f"{wpos_y:.3f}")
+                self.wpos_z_label.setText(f"{wpos_z:.3f}")
+
         elif data.lower() == "ok":
             self.send_next_gcode_line()
         elif data.startswith("$"):
@@ -307,7 +337,6 @@ class MainWindow(QMainWindow):
 
     def run_homing_cycle(self):
         self.is_homed = False
-        self.home_button.setText("Homing")
         self.home_pulse_timer.start()
         self.send_command("$H")
 
@@ -336,9 +365,11 @@ class MainWindow(QMainWindow):
         self.alarm_pulse_timer.stop()
         self.home_button.setStyleSheet("")
         self.unlock_button.setStyleSheet("")
+        self.set_zero_button.setStyleSheet("")
 
         if not is_connected:
             self.is_homed = False
+            self.is_work_zeroed = False
 
         # --- HOME BUTTON ---
         if self.machine_state == "Home":
@@ -360,6 +391,14 @@ class MainWindow(QMainWindow):
                 self.unlock_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
             else:
                 self.unlock_button.setText("Unlock ($X)")
+
+        # --- SET ZERO BUTTON ---
+        if self.is_work_zeroed:
+            self.set_zero_button.setText("Work Zeroed")
+            self.set_zero_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
+        else:
+            self.set_zero_button.setText("Set Zero (G10)")
+
 
     def start_gcode(self):
         if self.gcode_lines:
@@ -450,7 +489,7 @@ class MainWindow(QMainWindow):
     def pulse_home_button(self):
         self.home_button.setText("Homing")
         self.home_pulse_state = 1 - self.home_pulse_state
-        self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;") #
+        self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;")
 
     def pulse_alarm_button(self):
         self.unlock_button.setText("Unlocking")
