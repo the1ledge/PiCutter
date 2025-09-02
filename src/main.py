@@ -1,4 +1,4 @@
-# v0.12.1
+# v0.12.2
 import sys
 import serial.tools.list_ports
 import re
@@ -149,7 +149,8 @@ class MainWindow(QMainWindow):
             6: "Homing fail. The active homing cycle was reset.",
             7: "Homing fail. Door opened during homing cycle.",
             8: "Homing fail. Pull off failed to clear limit switch.",
-            9: "Homing fail. Could not find limit switch."
+            9: "Homing fail. Could not find limit switch.",
+            15: "Jog target exceeds machine travel."
         }
         self.setWindowTitle("PiGRBL CNC Controller")
         self.resize(800, 480)
@@ -195,6 +196,7 @@ class MainWindow(QMainWindow):
         self.gcode_is_paused = False
         self.machine_state = "Unknown"
         self.current_alarm_code = None
+        self.last_jog_button = None
         self.is_homed = False
         self.is_manually_zeroed = False
         self.z_is_auto_zeroed = False
@@ -425,12 +427,12 @@ class MainWindow(QMainWindow):
     def connect_signals(self):
         self.refresh_button.clicked.connect(self.populate_ports)
         self.connect_button.clicked.connect(self.toggle_connection)
-        self.x_plus_button.clicked.connect(lambda: self.send_jog_command("X", 1))
-        self.x_minus_button.clicked.connect(lambda: self.send_jog_command("X", -1))
-        self.y_plus_button.clicked.connect(lambda: self.send_jog_command("Y", 1))
-        self.y_minus_button.clicked.connect(lambda: self.send_jog_command("Y", -1))
-        self.z_plus_button.clicked.connect(lambda: self.send_jog_command("Z", 1))
-        self.z_minus_button.clicked.connect(lambda: self.send_jog_command("Z", -1))
+        self.x_plus_button.clicked.connect(lambda: self.send_jog_command("X", 1, self.x_plus_button))
+        self.x_minus_button.clicked.connect(lambda: self.send_jog_command("X", -1, self.x_minus_button))
+        self.y_plus_button.clicked.connect(lambda: self.send_jog_command("Y", 1, self.y_plus_button))
+        self.y_minus_button.clicked.connect(lambda: self.send_jog_command("Y", -1, self.y_minus_button))
+        self.z_plus_button.clicked.connect(lambda: self.send_jog_command("Z", 1, self.z_plus_button))
+        self.z_minus_button.clicked.connect(lambda: self.send_jog_command("Z", -1, self.z_minus_button))
         self.load_file_button.clicked.connect(self.load_gcode_file)
         self.start_button.clicked.connect(self.start_gcode)
         self.pause_button.clicked.connect(self.pause_gcode)
@@ -508,12 +510,21 @@ class MainWindow(QMainWindow):
                 self.send_next_probe_command()
             elif self.gcode_is_running:
                 self.send_next_gcode_line()
+        elif data.startswith("error:15"):
+            if self.last_jog_button:
+                self.flash_jog_button(self.last_jog_button)
+                self.last_jog_button = None # Reset it
+            self.log_to_console(f"ERROR: {self.alarm_codes.get(15, 'Jog target exceeds machine travel.')}")
         elif data.startswith("ALARM:"):
             try:
                 code = int(data.split(':')[1])
-                self.current_alarm_code = code
-                self.machine_state = "Alarm"
-                self.update_ui_states()
+                if code == 15 and self.last_jog_button:
+                    self.flash_jog_button(self.last_jog_button)
+                    self.last_jog_button = None
+                else:
+                    self.current_alarm_code = code
+                    self.machine_state = "Alarm"
+                    self.update_ui_states()
                 self.log_to_console(f"ALARM: {self.alarm_codes.get(code, 'Unknown alarm code.')}")
             except (ValueError, IndexError):
                 self.log_to_console(f"Could not parse alarm code from: {data}")
@@ -707,8 +718,11 @@ class MainWindow(QMainWindow):
         # --- UNLOCK BUTTON ---
         if self.machine_state == "Alarm":
             self.alarm_pulse_timer.start()
-            alarm_message = self.alarm_codes.get(self.current_alarm_code, "Unknown Alarm")
-            self.unlock_button.setText(f"ALARM: {alarm_message}")
+            if self.current_alarm_code in self.alarm_codes:
+                alarm_message = self.alarm_codes[self.current_alarm_code]
+                self.unlock_button.setText(f"ALARM: {alarm_message}")
+            else:
+                self.unlock_button.setText("UNLOCK")
             self.is_homed = False
         else:
             if is_connected:
@@ -791,7 +805,8 @@ class MainWindow(QMainWindow):
             self.send_command(command)
             self.command_input.clear()
 
-    def send_jog_command(self, axis, direction):
+    def send_jog_command(self, axis, direction, button):
+        self.last_jog_button = button
         self.is_manually_zeroed = False
         step = float(self.step_size_combo.currentText())
         self.send_command(f"$J=G91 G21 {axis}{step * direction} F1000")
@@ -841,8 +856,11 @@ class MainWindow(QMainWindow):
         self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;")
 
     def pulse_alarm_button(self):
-        alarm_message = self.alarm_codes.get(self.current_alarm_code, "Unknown Alarm")
-        base_text = f"ALARM: {alarm_message}"
+        if self.current_alarm_code in self.alarm_codes:
+            alarm_message = self.alarm_codes[self.current_alarm_code]
+            base_text = f"ALARM: {alarm_message}"
+        else:
+            base_text = "UNLOCK"
         self.unlock_button.setText(base_text)
         self.alarm_pulse_state = 1 - self.alarm_pulse_state
         self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state == 0 else '#FF7043'}; color: white; font-weight: bold;")
@@ -886,6 +904,17 @@ class MainWindow(QMainWindow):
 
     def get_grbl_fields(self):
         return {"$30": self.max_spindle_speed_input, "$120": self.x_accel_input, "$121": self.y_accel_input, "$122": self.z_accel_input}
+
+    def flash_jog_button(self, button):
+        original_text = button.text()
+        original_stylesheet = button.styleSheet()
+        button.setText("Soft Limit")
+        button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        QTimer.singleShot(2000, lambda: self.restore_jog_button(button, original_text, original_stylesheet))
+
+    def restore_jog_button(self, button, text, stylesheet):
+        button.setText(text)
+        button.setStyleSheet(stylesheet)
 
     def shutdown_pi(self):
         if QMessageBox.question(self, 'Confirm Shutdown', "Are you sure?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
