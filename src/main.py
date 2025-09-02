@@ -1,4 +1,4 @@
-# v0.11.3
+# v0.12.1
 import sys
 import serial.tools.list_ports
 import re
@@ -140,6 +140,17 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.alarm_codes = {
+            1: "Hard limit triggered. Position Lost.",
+            2: "Soft limit alarm, position kept. Unlock is Safe.",
+            3: "Reset while in motion. Position lost.",
+            4: "Probe fail. Probe not in expected initial state.",
+            5: "Probe fail. Probe did not contact the work.",
+            6: "Homing fail. The active homing cycle was reset.",
+            7: "Homing fail. Door opened during homing cycle.",
+            8: "Homing fail. Pull off failed to clear limit switch.",
+            9: "Homing fail. Could not find limit switch."
+        }
         self.setWindowTitle("PiGRBL CNC Controller")
         self.resize(800, 480)
         QApplication.setStyle("Fusion")
@@ -183,6 +194,7 @@ class MainWindow(QMainWindow):
         self.gcode_is_running = False
         self.gcode_is_paused = False
         self.machine_state = "Unknown"
+        self.current_alarm_code = None
         self.is_homed = False
         self.is_manually_zeroed = False
         self.z_is_auto_zeroed = False
@@ -457,7 +469,12 @@ class MainWindow(QMainWindow):
                 if new_state != self.machine_state:
                     self.machine_state = new_state
                     if self.machine_state == "Alarm":
+                        alarm_match = re.search(r"Alarm:(\d+)", data)
+                        if alarm_match:
+                            self.current_alarm_code = int(alarm_match.group(1))
                         self.is_probing = False
+                    else:
+                        self.current_alarm_code = None
                     self.update_ui_states()
 
             probe_match = re.search(r"\|Pn:([^|]+)", data)
@@ -489,8 +506,18 @@ class MainWindow(QMainWindow):
         elif data.lower() == "ok":
             if self.is_advanced_probing:
                 self.send_next_probe_command()
-            else:
+            elif self.gcode_is_running:
                 self.send_next_gcode_line()
+        elif data.startswith("ALARM:"):
+            try:
+                code = int(data.split(':')[1])
+                self.current_alarm_code = code
+                self.machine_state = "Alarm"
+                self.update_ui_states()
+                self.log_to_console(f"ALARM: {self.alarm_codes.get(code, 'Unknown alarm code.')}")
+            except (ValueError, IndexError):
+                self.log_to_console(f"Could not parse alarm code from: {data}")
+
         elif data.startswith("$"):
             parts = data.split("=")
             if len(parts) == 2: self.grbl_setting_received.emit(parts[0], parts[1])
@@ -680,10 +707,12 @@ class MainWindow(QMainWindow):
         # --- UNLOCK BUTTON ---
         if self.machine_state == "Alarm":
             self.alarm_pulse_timer.start()
+            alarm_message = self.alarm_codes.get(self.current_alarm_code, "Unknown Alarm")
+            self.unlock_button.setText(f"ALARM: {alarm_message}")
             self.is_homed = False
         else:
             if is_connected:
-                self.unlock_button.setText("No Alarms")
+                self.unlock_button.setText("No Alarm")
                 self.unlock_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
             else:
                 self.unlock_button.setText("Unlock ($X)")
@@ -812,9 +841,11 @@ class MainWindow(QMainWindow):
         self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;")
 
     def pulse_alarm_button(self):
-        self.unlock_button.setText("Unlocking")
+        alarm_message = self.alarm_codes.get(self.current_alarm_code, "Unknown Alarm")
+        base_text = f"ALARM: {alarm_message}"
+        self.unlock_button.setText(base_text)
         self.alarm_pulse_state = 1 - self.alarm_pulse_state
-        self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state == 0 else '#FF7043'}; color: white;")
+        self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state == 0 else '#FF7043'}; color: white; font-weight: bold;")
 
     def update_connection_indicator(self, is_connected):
         self.connection_status_indicator.setText("Connected" if is_connected else "Disconnected")
