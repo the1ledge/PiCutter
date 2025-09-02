@@ -1,4 +1,4 @@
-# v0.11.2
+# v0.11.3
 import sys
 import serial.tools.list_ports
 import re
@@ -184,7 +184,8 @@ class MainWindow(QMainWindow):
         self.gcode_is_paused = False
         self.machine_state = "Unknown"
         self.is_homed = False
-        self.is_work_zeroed = False
+        self.is_manually_zeroed = False
+        self.z_is_auto_zeroed = False
         self.is_probing = False
         self.probe_succeeded = False
         self.last_probe_state = False
@@ -230,7 +231,7 @@ class MainWindow(QMainWindow):
         actions_group = QGroupBox("Actions")
         actions_layout = QVBoxLayout()
         self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
-        self.set_zero_button, self.run_probe_button = QPushButton("Set Zero (G10)"), QPushButton("Run Probing Cycle")
+        self.set_zero_button, self.run_probe_button = QPushButton("Manual Position Zero"), QPushButton("Auto Zero Z")
         actions_layout.addWidget(self.home_button)
         actions_layout.addWidget(self.unlock_button)
         actions_layout.addWidget(self.run_probe_button)
@@ -424,7 +425,7 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_gcode)
         self.home_button.clicked.connect(self.run_homing_cycle)
         self.unlock_button.clicked.connect(lambda: self.send_command("$X"))
-        self.set_zero_button.clicked.connect(lambda: self.send_command("G10 L20 P1 X0 Y0 Z0"))
+        self.set_zero_button.clicked.connect(self.set_manual_zero)
         self.run_probe_button.clicked.connect(self.run_probe_cycle)
         self.spindle_on_button.clicked.connect(self.spindle_on)
         self.spindle_off_button.clicked.connect(lambda: self.send_command("M5"))
@@ -477,7 +478,6 @@ class MainWindow(QMainWindow):
                 wco_match = re.search(r"WCO:([\d.-]+),([\d.-]+),([\d.-]+)", data)
                 if wco_match:
                     self.wco_x, self.wco_y, self.wco_z = (float(c) for c in wco_match.groups())
-                    self.is_work_zeroed = True
 
                 wpos_x = mpos_x - self.wco_x
                 wpos_y = mpos_y - self.wco_y
@@ -507,23 +507,12 @@ class MainWindow(QMainWindow):
                 self.probe_succeeded = True
                 self.update_ui_states()
                 probe_thickness = float(self.settings.value("probe/thickness", 1.0))
-                self.send_command(f"G10 L20 P1 Z{probe_thickness}")
+                self.send_command(f"G10 L2 P1 Z{probe_thickness}")
                 self.log_to_console(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
 
     def run_probe_cycle(self):
-        # --- Step 1: Verify probe wiring ---
-        verify_dialog = ProbeVerifyDialog(self)
-        verify_dialog.e_stop_button.clicked.connect(self.emergency_stop)
-        self.probe_status_changed.connect(verify_dialog.update_probe_status)
-        self.send_command("?")
-
-        try:
-            result = verify_dialog.exec_()
-            if result != QDialog.Accepted:
-                return
-        finally:
-            self.probe_status_changed.disconnect(verify_dialog.update_probe_status)
-
+        self.is_manually_zeroed = False
+        self.z_is_auto_zeroed = False
         # --- Step 2: Verify tool is armed ---
         arm_dialog = ProbeArmDialog(self)
         arm_dialog.e_stop_button.clicked.connect(self.emergency_stop)
@@ -600,23 +589,25 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Probe Error", "Invalid Probe Thickness setting.")
             probe_thickness = 1.0
 
-        final_z_offset = avg_z + probe_thickness
+        final_z_offset = avg_z - probe_thickness
 
         self.log_to_console(f"INFO: Probe touch-point found at average Z: {avg_z:.4f}mm.")
-        self.log_to_console(f"INFO: Adding probe thickness of {probe_thickness:.4f}mm.")
+        self.log_to_console(f"INFO: Subtracting probe thickness of {probe_thickness:.4f}mm.")
         self.log_to_console(f"INFO: Setting new Work Z-Offset to {final_z_offset:.4f}mm.")
         self.log_to_console("INFO: The top of your workpiece is now Z=0.")
-        self.log_to_console("INFO: Retracting to a safe height of Z=10mm.")
+        safe_retract_height = probe_thickness + 10
+        self.log_to_console(f"INFO: Retracting to a safe height of Z={safe_retract_height:.4f}mm.")
 
         self.probe_command_queue = [
-            f"G10 L20 P1 Z{final_z_offset:.4f}",
-            "G0 Z10"
+            f"G10 L2 P1 Z{final_z_offset:.4f}",
+            f"G0 Z{safe_retract_height}"
         ]
         self.send_next_probe_command()
 
     def end_probe_cycle(self):
         if self.probe_phase == 'finalizing':
             self.probe_succeeded = True
+            self.z_is_auto_zeroed = True
 
         self.is_probing = False
         self.is_advanced_probing = False
@@ -632,8 +623,16 @@ class MainWindow(QMainWindow):
     def run_homing_cycle(self):
         self.is_homed = False
         self.probe_succeeded = False
+        self.is_manually_zeroed = False
+        self.z_is_auto_zeroed = False
         self.home_pulse_timer.start()
         self.send_command("$H")
+
+    def set_manual_zero(self):
+        self.send_command("G10 L2 P1 X0 Y0 Z0")
+        self.is_manually_zeroed = True
+        self.z_is_auto_zeroed = False
+        self.update_ui_states()
 
     def load_gcode_file(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Load G-Code", "", "*.gcode *.nc;;*.*")
@@ -666,7 +665,7 @@ class MainWindow(QMainWindow):
 
         if not is_connected:
             self.is_homed = False
-            self.is_work_zeroed = False
+            self.is_manually_zeroed = False
 
         # --- HOME BUTTON ---
         if self.machine_state == "Home":
@@ -690,11 +689,11 @@ class MainWindow(QMainWindow):
                 self.unlock_button.setText("Unlock ($X)")
 
         # --- SET ZERO BUTTON ---
-        if self.is_work_zeroed:
-            self.set_zero_button.setText("Work Zeroed")
+        if self.is_manually_zeroed:
+            self.set_zero_button.setText("Manually Zeroed")
             self.set_zero_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
         else:
-            self.set_zero_button.setText("Set Zero (G10)")
+            self.set_zero_button.setText("Manual Position Zero")
 
         # --- PROBE BUTTON ---
         if self.machine_state == "Alarm":
@@ -703,18 +702,19 @@ class MainWindow(QMainWindow):
         elif self.is_probing:
             self.run_probe_button.setText("Probing...")
             self.run_probe_button.setEnabled(False)
-        elif self.probe_succeeded:
-            self.run_probe_button.setText("Probe Completed")
+        elif self.z_is_auto_zeroed:
+            self.run_probe_button.setText("Z Zeroed")
             self.run_probe_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
             self.run_probe_button.setEnabled(is_connected)
         else:
-            self.run_probe_button.setText("Run Probing Cycle")
+            self.run_probe_button.setText("Auto Zero Z")
             self.run_probe_button.setEnabled(is_connected)
 
 
     def start_gcode(self):
         if self.gcode_lines:
             self.probe_succeeded = False
+            self.is_manually_zeroed = False
             self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = True, False, 0
             self.update_ui_states()
             self.send_next_gcode_line()
@@ -763,7 +763,7 @@ class MainWindow(QMainWindow):
             self.command_input.clear()
 
     def send_jog_command(self, axis, direction):
-        self.probe_succeeded = False
+        self.is_manually_zeroed = False
         step = float(self.step_size_combo.currentText())
         self.send_command(f"$J=G91 G21 {axis}{step * direction} F1000")
 
