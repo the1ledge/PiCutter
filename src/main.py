@@ -1,4 +1,4 @@
-# v0.12.2
+# v0.13.5
 import sys
 import serial.tools.list_ports
 import re
@@ -112,6 +112,37 @@ class ProbeArmDialog(QDialog):
             self.ok_button.setEnabled(False)
 
 
+class LocationDialog(QDialog):
+    def __init__(self, parent, title, locations, prompt):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.selected_index = -1
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(prompt))
+
+        self.location_combo = QComboBox()
+        self.location_combo.addItems(locations)
+        layout.addWidget(self.location_combo)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def accept(self):
+        self.selected_index = self.location_combo.currentIndex()
+        super().accept()
+
+    @staticmethod
+    def get_selected_index(parent, title, locations, prompt):
+        dialog = LocationDialog(parent, title, locations, prompt)
+        if dialog.exec_() == QDialog.Accepted:
+            return dialog.selected_index
+        return -1
+
+
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
 
@@ -209,6 +240,7 @@ class MainWindow(QMainWindow):
         self.probe_response_count = 0
         self.probe_phase = None
         self.wco_x, self.wco_y, self.wco_z = 0.0, 0.0, 0.0
+        self.mpos_x, self.mpos_y, self.mpos_z = 0.0, 0.0, 0.0
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
@@ -245,11 +277,15 @@ class MainWindow(QMainWindow):
         actions_group = QGroupBox("Actions")
         actions_layout = QVBoxLayout()
         self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
-        self.set_zero_button, self.run_probe_button = QPushButton("Manual Position Zero"), QPushButton("Auto Zero Z")
+        self.run_probe_button = QPushButton("Auto Zero Z")
+        self.set_location_button = QPushButton("Set Location")
+        self.go_to_location_button = QPushButton("Go To Location")
+
         actions_layout.addWidget(self.home_button)
         actions_layout.addWidget(self.unlock_button)
         actions_layout.addWidget(self.run_probe_button)
-        actions_layout.addWidget(self.set_zero_button)
+        actions_layout.addWidget(self.set_location_button)
+        actions_layout.addWidget(self.go_to_location_button)
         actions_group.setLayout(actions_layout)
         left_column_layout.addWidget(actions_group)
         
@@ -439,7 +475,8 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_gcode)
         self.home_button.clicked.connect(self.run_homing_cycle)
         self.unlock_button.clicked.connect(lambda: self.send_command("$X"))
-        self.set_zero_button.clicked.connect(self.set_manual_zero)
+        self.set_location_button.clicked.connect(self.set_location)
+        self.go_to_location_button.clicked.connect(self.go_to_location)
         self.run_probe_button.clicked.connect(self.run_probe_cycle)
         self.spindle_on_button.clicked.connect(self.spindle_on)
         self.spindle_off_button.clicked.connect(lambda: self.send_command("M5"))
@@ -489,18 +526,18 @@ class MainWindow(QMainWindow):
 
             pos_match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
             if pos_match:
-                mpos_x, mpos_y, mpos_z = (float(c) for c in pos_match.groups())
-                self.x_pos_label.setText(f"{mpos_x:.3f}")
-                self.y_pos_label.setText(f"{mpos_y:.3f}")
-                self.z_pos_label.setText(f"{mpos_z:.3f}")
+                self.mpos_x, self.mpos_y, self.mpos_z = (float(c) for c in pos_match.groups())
+                self.x_pos_label.setText(f"{self.mpos_x:.3f}")
+                self.y_pos_label.setText(f"{self.mpos_y:.3f}")
+                self.z_pos_label.setText(f"{self.mpos_z:.3f}")
 
                 wco_match = re.search(r"WCO:([\d.-]+),([\d.-]+),([\d.-]+)", data)
                 if wco_match:
                     self.wco_x, self.wco_y, self.wco_z = (float(c) for c in wco_match.groups())
 
-                wpos_x = mpos_x - self.wco_x
-                wpos_y = mpos_y - self.wco_y
-                wpos_z = mpos_z - self.wco_z
+                wpos_x = self.mpos_x - self.wco_x
+                wpos_y = self.mpos_y - self.wco_y
+                wpos_z = self.mpos_z - self.wco_z
                 self.wpos_x_label.setText(f"{wpos_x:.3f}")
                 self.wpos_y_label.setText(f"{wpos_y:.3f}")
                 self.wpos_z_label.setText(f"{wpos_z:.3f}")
@@ -666,11 +703,37 @@ class MainWindow(QMainWindow):
         self.home_pulse_timer.start()
         self.send_command("$H")
 
-    def set_manual_zero(self):
-        self.send_command("G10 L2 P1 X0 Y0 Z0")
-        self.is_manually_zeroed = True
-        self.z_is_auto_zeroed = False
-        self.update_ui_states()
+    def set_location(self):
+        locations = [f"Work Origin G{54+i} (P{i+1})" for i in range(6)] + ["Safe Position (G28.1)"]
+        prompt = "Select which location you would like to set:"
+        choice_index = LocationDialog.get_selected_index(self, "Set Location", locations, prompt)
+
+        if choice_index == -1:
+            return # User cancelled
+
+        if choice_index < 6: # Corresponds to G54-G59
+            p_number = choice_index + 1
+            command = f"G10 L2 P{p_number} X{self.mpos_x} Y{self.mpos_y} Z{self.mpos_z}"
+            self.send_command(command)
+            self.log_to_console(f"INFO: Set work origin for G{53 + p_number} (P{p_number}).")
+        else: # Corresponds to Safe Position
+            self.send_command("G28.1")
+            self.log_to_console("INFO: Current position saved as safe position (G28).")
+
+    def go_to_location(self):
+        locations = [f"Work Origin G{54+i}" for i in range(6)] + ["Safe Position (G28)"]
+        prompt = "Select which location you would like to go to:"
+        choice_index = LocationDialog.get_selected_index(self, "Go To Location", locations, prompt)
+
+        if choice_index == -1:
+            return # User cancelled
+
+        if choice_index < 6: # Corresponds to G54-G59
+            wcs_command = f"G{54+choice_index}"
+            self.send_command(wcs_command)
+            self.send_command("G90 G0 X0 Y0")
+        else: # Corresponds to Safe Position
+            self.send_command("G28")
 
     def load_gcode_file(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Load G-Code", "", "*.gcode *.nc;;*.*")
@@ -689,7 +752,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
         self.pause_button.setEnabled(is_connected and self.gcode_is_running)
         self.stop_button.setEnabled(is_connected and self.gcode_is_running)
-        for button in [self.home_button, self.unlock_button, self.set_zero_button, self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input]:
+        for button in [self.home_button, self.unlock_button, self.run_probe_button, self.set_location_button, self.go_to_location_button, self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input]:
             button.setEnabled(is_connected)
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
 
@@ -697,7 +760,6 @@ class MainWindow(QMainWindow):
         self.alarm_pulse_timer.stop()
         self.home_button.setStyleSheet("")
         self.unlock_button.setStyleSheet("")
-        self.set_zero_button.setStyleSheet("")
         self.run_probe_button.setStyleSheet("")
 
 
@@ -732,11 +794,8 @@ class MainWindow(QMainWindow):
                 self.unlock_button.setText("Unlock ($X)")
 
         # --- SET ZERO BUTTON ---
-        if self.is_manually_zeroed:
-            self.set_zero_button.setText("Manually Zeroed")
-            self.set_zero_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
-        else:
-            self.set_zero_button.setText("Manual Position Zero")
+        # This logic has been removed and replaced by the new unified
+        # "Set Location" and "Go To Location" buttons.
 
         # --- PROBE BUTTON ---
         if self.machine_state == "Alarm":
