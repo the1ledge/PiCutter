@@ -5,7 +5,7 @@ import re
 import time
 import os
 from PySide2.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip
 )
 from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings
 from PySide2.QtGui import QTextCursor
@@ -183,9 +183,46 @@ class MainWindow(QMainWindow):
             9: "Homing fail. Could not find limit switch.",
             15: "Jog target exceeds machine travel."
         }
+        self.GRBL_SETTING_DESCRIPTIONS = {
+            "$0": "Step pulse time, microseconds",
+            "$1": "Step idle delay, milliseconds",
+            "$2": "Step port invert, mask",
+            "$3": "Direction port invert, mask",
+            "$4": "Step enable invert, boolean",
+            "$5": "Limit pins invert, boolean",
+            "$6": "Probe pin invert, boolean",
+            "$10": "Status report, mask",
+            "$11": "Junction deviation, mm",
+            "$12": "Arc tolerance, mm",
+            "$13": "Report inches, boolean",
+            "$20": "Soft limits, boolean",
+            "$21": "Hard limits, boolean",
+            "$22": "Homing cycle, boolean",
+            "$23": "Homing dir invert, mask",
+            "$24": "Homing feed, mm/min",
+            "$25": "Homing seek, mm/min",
+            "$26": "Homing debounce, milliseconds",
+            "$27": "Homing pull-off, mm",
+            "$30": "Max spindle speed, RPM",
+            "$31": "Min spindle speed, RPM",
+            "$32": "Laser mode, boolean",
+            "$100": "X-axis steps/mm",
+            "$101": "Y-axis steps/mm",
+            "$102": "Z-axis steps/mm",
+            "$110": "X-axis max rate, mm/min",
+            "$111": "Y-axis max rate, mm/min",
+            "$112": "Z-axis max rate, mm/min",
+            "$120": "X-axis acceleration, mm/sec^2",
+            "$121": "Y-axis acceleration, mm/sec^2",
+            "$122": "Z-axis acceleration, mm/sec^2",
+            "$130": "X-axis max travel, mm",
+            "$131": "Y-axis max travel, mm",
+            "$132": "Z-axis max travel, mm",
+        }
         self.setWindowTitle("PiGRBL CNC Controller")
         self.resize(800, 480)
         QApplication.setStyle("Fusion")
+        QApplication.instance().setStyleSheet("QToolTip { color: #000000; background-color: #ffffff; border: 1px solid black; }")
         self.settings = QSettings("MyCompany", "PiGRBLCNC")
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -241,6 +278,7 @@ class MainWindow(QMainWindow):
         self.probe_phase = None
         self.wco_x, self.wco_y, self.wco_z = 0.0, 0.0, 0.0
         self.mpos_x, self.mpos_y, self.mpos_z = 0.0, 0.0, 0.0
+        self.grbl_settings_count = 0
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
@@ -439,17 +477,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(probe_group)
 
         self.initial_grbl_settings = {}
+        self.grbl_setting_widgets = {}
         grbl_group = QGroupBox("GRBL Settings")
-        grbl_layout = QFormLayout()
+        self.grbl_layout = QGridLayout()
         read_button = QPushButton("Read Settings From Machine")
         read_button.clicked.connect(lambda: self.send_command("$$"))
-        grbl_layout.addWidget(read_button)
-        self.max_spindle_speed_input, self.x_accel_input, self.y_accel_input, self.z_accel_input = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
-        grbl_layout.addRow("Max Spindle ($30):", self.max_spindle_speed_input)
-        grbl_layout.addRow("X Accel ($120):", self.x_accel_input)
-        grbl_layout.addRow("Y Accel ($121):", self.y_accel_input)
-        grbl_layout.addRow("Z Accel ($122):", self.z_accel_input)
-        grbl_group.setLayout(grbl_layout)
+        self.grbl_layout.addWidget(read_button, 0, 0, 1, 6)
+        grbl_group.setLayout(self.grbl_layout)
         layout.addWidget(grbl_group)
 
         layout.addStretch()
@@ -949,8 +983,19 @@ class MainWindow(QMainWindow):
 
     def update_grbl_setting(self, setting, value):
         self.initial_grbl_settings[setting] = value
-        if setting in self.get_grbl_fields():
-            self.get_grbl_fields()[setting].setText(value)
+        if setting in self.grbl_setting_widgets:
+            self.grbl_setting_widgets[setting].setText(value)
+        else:
+            label = QLabel(f"{setting}:")
+            field = QLineEdit(value)
+            description = self.GRBL_SETTING_DESCRIPTIONS.get(setting, "No description available.")
+            field.setToolTip(description)
+            row = (self.grbl_settings_count // 3) + 1
+            col = self.grbl_settings_count % 3
+            self.grbl_layout.addWidget(label, row, col * 2)
+            self.grbl_layout.addWidget(field, row, col * 2 + 1)
+            self.grbl_setting_widgets[setting] = field
+            self.grbl_settings_count += 1
 
     def get_settings_widgets(self):
         return {
@@ -962,7 +1007,7 @@ class MainWindow(QMainWindow):
         }
 
     def get_grbl_fields(self):
-        return {"$30": self.max_spindle_speed_input, "$120": self.x_accel_input, "$121": self.y_accel_input, "$122": self.z_accel_input}
+        return self.grbl_setting_widgets
 
     def flash_jog_button(self, button):
         original_text = button.text()
