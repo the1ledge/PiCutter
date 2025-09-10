@@ -1,4 +1,4 @@
-# v0.13.5
+# v0.13.6
 import sys
 import serial.tools.list_ports
 import re
@@ -183,41 +183,41 @@ class MainWindow(QMainWindow):
             9: "Homing fail. Could not find limit switch.",
             15: "Jog target exceeds machine travel."
         }
-        self.GRBL_SETTING_DESCRIPTIONS = {
-            "$0": "Step pulse time, microseconds",
-            "$1": "Step idle delay, milliseconds",
-            "$2": "Step port invert, mask",
-            "$3": "Direction port invert, mask",
-            "$4": "Step enable invert, boolean",
-            "$5": "Limit pins invert, boolean",
-            "$6": "Probe pin invert, boolean",
-            "$10": "Status report, mask",
-            "$11": "Junction deviation, mm",
-            "$12": "Arc tolerance, mm",
-            "$13": "Report inches, boolean",
-            "$20": "Soft limits, boolean",
-            "$21": "Hard limits, boolean",
-            "$22": "Homing cycle, boolean",
-            "$23": "Homing dir invert, mask",
-            "$24": "Homing feed, mm/min",
-            "$25": "Homing seek, mm/min",
-            "$26": "Homing debounce, milliseconds",
-            "$27": "Homing pull-off, mm",
-            "$30": "Max spindle speed, RPM",
-            "$31": "Min spindle speed, RPM",
-            "$32": "Laser mode, boolean",
-            "$100": "X-axis steps/mm",
-            "$101": "Y-axis steps/mm",
-            "$102": "Z-axis steps/mm",
-            "$110": "X-axis max rate, mm/min",
-            "$111": "Y-axis max rate, mm/min",
-            "$112": "Z-axis max rate, mm/min",
-            "$120": "X-axis acceleration, mm/sec^2",
-            "$121": "Y-axis acceleration, mm/sec^2",
-            "$122": "Z-axis acceleration, mm/sec^2",
-            "$130": "X-axis max travel, mm",
-            "$131": "Y-axis max travel, mm",
-            "$132": "Z-axis max travel, mm",
+        self.GRBL_SETTINGS_INFO = {
+            "$0": {"label": "Step pulse time (μs)", "tooltip": "Sets the step pulse duration. A value around 10 microseconds is recommended."},
+            "$1": {"label": "Step idle delay (ms)", "tooltip": "Delays disabling steppers after a motion. Set to 255 to keep steppers always enabled."},
+            "$2": {"label": "Step port invert (mask)", "tooltip": "Inverts the step pulse signal. Useful for certain stepper drivers."},
+            "$3": {"label": "Direction port invert (mask)", "tooltip": "Inverts the direction signal for each axis."},
+            "$4": {"label": "Step enable invert (boolean)", "tooltip": "Inverts the stepper enable pin. High to disable, low to enable. $4=1 to invert."},
+            "$5": {"label": "Limit pins invert (boolean)", "tooltip": "Inverts the limit pins. Requires external pull-down resistors if inverted."},
+            "$6": {"label": "Probe pin invert (boolean)", "tooltip": "Inverts the probe pin. Requires an external pull-down resistor if inverted."},
+            "$10": {"label": "Status report (mask)", "tooltip": "Determines what real-time data Grbl reports back. Default is $10=1 (MPos and no buffer data)."},
+            "$11": {"label": "Junction deviation (mm)", "tooltip": "Controls how fast the machine moves through corners. Lower values are slower and safer."},
+            "$12": {"label": "Arc tolerance (mm)", "tooltip": "Defines the accuracy of G2/G3 arcs. Default (0.002mm) is usually sufficient."},
+            "$13": {"label": "Report inches (boolean)", "tooltip": "When enabled ($13=1), Grbl reports positions in inches, not mm."},
+            "$20": {"label": "Soft limits (boolean)", "tooltip": "Prevents the machine from exceeding travel limits. Requires homing and max travel settings."},
+            "$21": {"label": "Hard limits (boolean)", "tooltip": "Uses physical switches to prevent exceeding travel limits. Requires normally-open switches."},
+            "$22": {"label": "Homing cycle (boolean)", "tooltip": "Enables homing ($H). Locks G-code commands until homing is performed."},
+            "$23": {"label": "Homing dir invert (mask)", "tooltip": "Inverts the homing direction for axes with limit switches in the negative direction."},
+            "$24": {"label": "Homing feed (mm/min)", "tooltip": "The slower feed rate used to precisely locate machine zero during homing."},
+            "$25": {"label": "Homing seek (mm/min)", "tooltip": "The faster seek rate used to find the limit switches during homing."},
+            "$26": {"label": "Homing debounce (ms)", "tooltip": "A short delay to handle electrical/mechanical noise on limit switches. 5-25ms is typical."},
+            "$27": {"label": "Homing pull-off (mm)", "tooltip": "Distance to move off limit switches after homing to prevent accidental triggering."},
+            "$30": {"label": "Max spindle speed (RPM)", "tooltip": "Sets the spindle speed for the maximum 5V PWM pin output."},
+            "$31": {"label": "Min spindle speed (RPM)", "tooltip": "Sets the spindle speed for the minimum PWM pin output (0.02V). 0 RPM disables the spindle."},
+            "$32": {"label": "Laser mode (boolean)", "tooltip": "Enables continuous motion for laser engraving. Use with caution."},
+            "$100": {"label": "X-axis steps/mm", "tooltip": "Number of steps required to move the X-axis by 1mm."},
+            "$101": {"label": "Y-axis steps/mm", "tooltip": "Number of steps required to move the Y-axis by 1mm."},
+            "$102": {"label": "Z-axis steps/mm", "tooltip": "Number of steps required to move the Z-axis by 1mm."},
+            "$110": {"label": "X-axis max rate (mm/min)", "tooltip": "Maximum rate the X-axis can move. Also sets G0 seek rate."},
+            "$111": {"label": "Y-axis max rate (mm/min)", "tooltip": "Maximum rate the Y-axis can move. Also sets G0 seek rate."},
+            "$112": {"label": "Z-axis max rate (mm/min)", "tooltip": "Maximum rate the Z-axis can move. Also sets G0 seek rate."},
+            "$120": {"label": "X-axis acceleration (mm/sec^2)", "tooltip": "Acceleration for the X-axis. Lower values are gentler."},
+            "$121": {"label": "Y-axis acceleration (mm/sec^2)", "tooltip": "Acceleration for the Y-axis. Lower values are gentler."},
+            "$122": {"label": "Z-axis acceleration (mm/sec^2)", "tooltip": "Acceleration for the Z-axis. Lower values are gentler."},
+            "$130": {"label": "X-axis max travel (mm)", "tooltip": "Maximum travel for the X-axis. Used for soft limits."},
+            "$131": {"label": "Y-axis max travel (mm)", "tooltip": "Maximum travel for the Y-axis. Used for soft limits."},
+            "$132": {"label": "Z-axis max travel (mm)", "tooltip": "Maximum travel for the Z-axis. Used for soft limits."}
         }
         self.setWindowTitle("PiGRBL CNC Controller")
         self.resize(800, 480)
@@ -986,10 +986,18 @@ class MainWindow(QMainWindow):
         if setting in self.grbl_setting_widgets:
             self.grbl_setting_widgets[setting].setText(value)
         else:
-            label = QLabel(f"{setting}:")
+            setting_info = self.GRBL_SETTINGS_INFO.get(setting)
+            if not setting_info:
+                label_text = f"{setting}:"
+                tooltip_text = "No description available."
+            else:
+                label_text = f"{setting_info['label']}:"
+                tooltip_text = setting_info['tooltip']
+
+            label = QLabel(label_text)
             field = QLineEdit(value)
-            description = self.GRBL_SETTING_DESCRIPTIONS.get(setting, "No description available.")
-            field.setToolTip(description)
+            field.setToolTip(tooltip_text)
+
             row = (self.grbl_settings_count // 3) + 1
             col = self.grbl_settings_count % 3
             self.grbl_layout.addWidget(label, row, col * 2)
