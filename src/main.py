@@ -1,4 +1,4 @@
-# v0.13.6
+# v0.13.7
 import sys
 import serial.tools.list_ports
 import re
@@ -7,7 +7,7 @@ import os
 from PySide2.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip
 )
-from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings
+from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings, QEvent
 from PySide2.QtGui import QTextCursor
 
 class ProbeVerifyDialog(QDialog):
@@ -143,6 +143,59 @@ class LocationDialog(QDialog):
         return -1
 
 
+class NumberPadDialog(QDialog):
+    def __init__(self, initial_value="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Number Pad")
+        self.setModal(True)
+
+        layout = QGridLayout(self)
+
+        self.display = QLineEdit(initial_value)
+        self.display.setReadOnly(True)
+        self.display.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.display, 0, 0, 1, 4)
+
+        button_map = {
+            '7': (1, 0), '8': (1, 1), '9': (1, 2),
+            '4': (2, 0), '5': (2, 1), '6': (2, 2),
+            '1': (3, 0), '2': (3, 1), '3': (3, 2),
+            '0': (4, 0), '.': (4, 1),
+            'Backspace': (1, 3), 'Clear': (2, 3),
+            'Enter': (3, 3), 'Cancel': (4, 3)
+        }
+
+        for text, pos in button_map.items():
+            button = QPushButton(text)
+            if text.isdigit() or text == '.':
+                button.clicked.connect(self.on_digit_pressed)
+            elif text == 'Backspace':
+                button.clicked.connect(self.on_backspace_pressed)
+            elif text == 'Clear':
+                button.clicked.connect(self.on_clear_pressed)
+            elif text == 'Enter':
+                button.clicked.connect(self.accept)
+            elif text == 'Cancel':
+                button.clicked.connect(self.reject)
+            layout.addWidget(button, pos[0], pos[1])
+
+    def on_digit_pressed(self):
+        button = self.sender()
+        if button.text() == '.' and '.' in self.display.text():
+            return
+        new_text = self.display.text() + button.text()
+        self.display.setText(new_text)
+
+    def on_backspace_pressed(self):
+        self.display.setText(self.display.text()[:-1])
+
+    def on_clear_pressed(self):
+        self.display.clear()
+
+    def get_value(self):
+        return self.display.text()
+
+
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
 
@@ -250,6 +303,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(top_bar_layout)
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
+        self.numpad_enabled_fields = []
         self.build_manual_control_tab()
         self.build_gcode_tab()
         self.build_console_tab()
@@ -306,6 +360,8 @@ class MainWindow(QMainWindow):
         spindle_group = QGroupBox("Spindle")
         spindle_layout = QFormLayout()
         self.spindle_speed_input = QLineEdit("1000")
+        self.numpad_enabled_fields.append(self.spindle_speed_input)
+        self.spindle_speed_input.installEventFilter(self)
         self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
         spindle_layout.addRow("Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
@@ -448,8 +504,13 @@ class MainWindow(QMainWindow):
         tab_layout.addWidget(scroll_area)
 
         content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
+        layout = QHBoxLayout(content_widget)
         scroll_area.setWidget(content_widget)
+
+        # --- Left Column ---
+        left_column_widget = QWidget()
+        left_column_layout = QVBoxLayout(left_column_widget)
+        left_column_layout.setContentsMargins(0, 0, 0, 0)
 
         connection_settings_group = QGroupBox("Serial Connection")
         connection_settings_layout = QFormLayout()
@@ -462,7 +523,7 @@ class MainWindow(QMainWindow):
         connection_settings_layout.addRow("Baud Rate:", self.baud_combobox)
         connection_settings_layout.addRow(self.refresh_button)
         connection_settings_group.setLayout(connection_settings_layout)
-        layout.addWidget(connection_settings_group)
+        left_column_layout.addWidget(connection_settings_group)
 
         probe_group = QGroupBox("Probe Settings")
         probe_layout = QFormLayout()
@@ -474,20 +535,32 @@ class MainWindow(QMainWindow):
         probe_layout.addRow("Probe Retraction (mm):", self.probe_retract_input)
         probe_layout.addRow("Probe Thickness (mm):", self.probe_thickness_input)
         probe_group.setLayout(probe_layout)
-        layout.addWidget(probe_group)
+        left_column_layout.addWidget(probe_group)
+        probe_fields = [
+            self.probe_dist_input, self.probe_feed_input,
+            self.slow_probe_feed_input, self.probe_retract_input,
+            self.probe_thickness_input
+        ]
+        self.numpad_enabled_fields.extend(probe_fields)
+        for field in probe_fields:
+            field.installEventFilter(self)
+        left_column_layout.addStretch(1)
 
+        # --- Right Column (GRBL Settings) ---
         self.initial_grbl_settings = {}
         self.grbl_setting_widgets = {}
         grbl_group = QGroupBox("GRBL Settings")
         self.grbl_layout = QGridLayout()
         read_button = QPushButton("Read Settings From Machine")
         read_button.clicked.connect(lambda: self.send_command("$$"))
-        self.grbl_layout.addWidget(read_button, 0, 0, 1, 6)
+        self.grbl_layout.addWidget(read_button, 0, 0, 1, 4)
         grbl_group.setLayout(self.grbl_layout)
-        layout.addWidget(grbl_group)
 
-        layout.addStretch()
+        # Add columns to main layout
+        layout.addWidget(left_column_widget, 1)
+        layout.addWidget(grbl_group, 2)
 
+        # --- Save Button ---
         save_button = QPushButton("Save All Settings")
         save_button.clicked.connect(self.save_settings)
         tab_layout.addWidget(save_button)
@@ -997,12 +1070,14 @@ class MainWindow(QMainWindow):
             label = QLabel(label_text)
             field = QLineEdit(value)
             field.setToolTip(tooltip_text)
+            field.installEventFilter(self)
 
-            row = (self.grbl_settings_count // 3) + 1
-            col = self.grbl_settings_count % 3
+            row = (self.grbl_settings_count // 2) + 1
+            col = self.grbl_settings_count % 2
             self.grbl_layout.addWidget(label, row, col * 2)
             self.grbl_layout.addWidget(field, row, col * 2 + 1)
             self.grbl_setting_widgets[setting] = field
+            self.numpad_enabled_fields.append(field)
             self.grbl_settings_count += 1
 
     def get_settings_widgets(self):
@@ -1016,6 +1091,13 @@ class MainWindow(QMainWindow):
 
     def get_grbl_fields(self):
         return self.grbl_setting_widgets
+
+    def show_number_pad(self, line_edit):
+        dialog = NumberPadDialog(line_edit.text(), self)
+        if dialog.exec_() == QDialog.Accepted:
+            new_value = dialog.get_value()
+            line_edit.setText(new_value)
+        line_edit.clearFocus()
 
     def flash_jog_button(self, button):
         original_text = button.text()
@@ -1035,6 +1117,18 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.disconnect_serial()
         super().closeEvent(event)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.FocusIn:
+            if isinstance(obj, QLineEdit) and obj in self.numpad_enabled_fields:
+                obj.setReadOnly(True)
+                self.show_number_pad(obj)
+                return True
+        elif event.type() == QEvent.FocusOut:
+            if isinstance(obj, QLineEdit) and obj in self.numpad_enabled_fields:
+                obj.setReadOnly(False)
+        return super().eventFilter(obj, event)
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
