@@ -1,4 +1,4 @@
-# v0.13.7
+# v0.14.2
 import sys
 import serial.tools.list_ports
 import re
@@ -326,6 +326,7 @@ class MainWindow(QMainWindow):
         self.probe_succeeded = False
         self.last_probe_state = False
         self.is_advanced_probing = False
+        self.xyz_probe_stage = None
         self.probe_command_queue = []
         self.probe_results = []
         self.probe_response_count = 0
@@ -372,12 +373,14 @@ class MainWindow(QMainWindow):
         actions_layout = QVBoxLayout()
         self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
         self.run_probe_button = QPushButton("Auto Zero Z")
+        self.run_3axis_probe_button = QPushButton("3-Axis XYZ Probe")
         self.set_location_button = QPushButton("Set Location")
         self.go_to_location_button = QPushButton("Go To Location")
 
         actions_layout.addWidget(self.home_button)
         actions_layout.addWidget(self.unlock_button)
         actions_layout.addWidget(self.run_probe_button)
+        actions_layout.addWidget(self.run_3axis_probe_button)
         actions_layout.addWidget(self.set_location_button)
         actions_layout.addWidget(self.go_to_location_button)
         actions_group.setLayout(actions_layout)
@@ -528,18 +531,19 @@ class MainWindow(QMainWindow):
         probe_group = QGroupBox("Probe Settings")
         probe_layout = QFormLayout()
         self.probe_dist_input, self.probe_feed_input, self.probe_thickness_input = QLineEdit(), QLineEdit(), QLineEdit()
-        self.slow_probe_feed_input, self.probe_retract_input = QLineEdit(), QLineEdit()
+        self.slow_probe_feed_input, self.probe_retract_input, self.tool_radius_input = QLineEdit(), QLineEdit(), QLineEdit()
         probe_layout.addRow("Probe Travel (mm):", self.probe_dist_input)
         probe_layout.addRow("Fast Probe Feed Rate:", self.probe_feed_input)
         probe_layout.addRow("Slow Probe Feed Rate:", self.slow_probe_feed_input)
         probe_layout.addRow("Probe Retraction (mm):", self.probe_retract_input)
         probe_layout.addRow("Probe Thickness (mm):", self.probe_thickness_input)
+        probe_layout.addRow("Tool Radius (mm):", self.tool_radius_input)
         probe_group.setLayout(probe_layout)
         left_column_layout.addWidget(probe_group)
         probe_fields = [
             self.probe_dist_input, self.probe_feed_input,
             self.slow_probe_feed_input, self.probe_retract_input,
-            self.probe_thickness_input
+            self.probe_thickness_input, self.tool_radius_input
         ]
         self.numpad_enabled_fields.extend(probe_fields)
         for field in probe_fields:
@@ -585,6 +589,7 @@ class MainWindow(QMainWindow):
         self.set_location_button.clicked.connect(self.set_location)
         self.go_to_location_button.clicked.connect(self.go_to_location)
         self.run_probe_button.clicked.connect(self.run_probe_cycle)
+        self.run_3axis_probe_button.clicked.connect(self.run_3axis_probe_cycle)
         self.spindle_on_button.clicked.connect(self.spindle_on)
         self.spindle_off_button.clicked.connect(lambda: self.send_command("M5"))
         self.exit_button.clicked.connect(self.close)
@@ -679,11 +684,18 @@ class MainWindow(QMainWindow):
         elif data.startswith("[PRB:"):
             if self.is_advanced_probing:
                 self.probe_response_count += 1
-                prb_match = re.search(r"\[PRB:[\d.-]+,[\d.-]+,([\d.-]+):", data)
+                prb_match = re.search(r"\[PRB:([\d.-]+),([\d.-]+),([\d.-]+):", data)
                 if prb_match:
-                    if self.probe_response_count > 1:
-                        z_val = float(prb_match.group(1))
-                        self.probe_results.append(z_val)
+                    if self.probe_response_count > 1: # Ignore the first fast probe result
+                        if self.xyz_probe_stage == 'Z':
+                            val = float(prb_match.group(3))
+                        elif self.xyz_probe_stage == 'X':
+                            val = float(prb_match.group(1))
+                        elif self.xyz_probe_stage == 'Y':
+                            val = float(prb_match.group(2))
+                        else: # Fallback for old probe cycle
+                            val = float(prb_match.group(3))
+                        self.probe_results.append(val)
             else:
                 self.is_probing = False
                 self.probe_succeeded = True
@@ -753,7 +765,10 @@ class MainWindow(QMainWindow):
             if self.probe_phase == 'probing':
                 self.start_probe_finalization()
             elif self.probe_phase == 'finalizing':
-                self.end_probe_cycle()
+                if self.xyz_probe_stage in ['X_TRANSITION', 'Y_TRANSITION', 'FINALIZE']:
+                    self.handle_probe_transition()
+                else:
+                    self.end_probe_cycle()
 
     def start_probe_finalization(self):
         if len(self.probe_results) != 3:
@@ -763,28 +778,84 @@ class MainWindow(QMainWindow):
             return
 
         self.probe_phase = 'finalizing'
+        avg_pos = sum(self.probe_results) / len(self.probe_results)
 
-        avg_z = sum(self.probe_results) / len(self.probe_results)
         try:
             probe_thickness = float(self.settings.value("probe/thickness", 1.0))
+            tool_radius = float(self.settings.value("probe/tool_radius", 3.15))
         except (ValueError, TypeError):
-            QMessageBox.critical(self, "Probe Error", "Invalid Probe Thickness setting.")
-            probe_thickness = 1.0
+            QMessageBox.critical(self, "Probe Error", "Invalid Probe Thickness or Tool Radius setting.")
+            self.end_probe_cycle()
+            return
 
-        final_z_offset = avg_z - probe_thickness
+        if not self.xyz_probe_stage or self.xyz_probe_stage == 'Z':
+            final_offset = avg_pos - probe_thickness
+            self.log_to_console(f"INFO: Z-Probe successful. Average: {avg_pos:.4f}mm. Setting Z-Work-Offset.")
 
-        self.log_to_console(f"INFO: Probe touch-point found at average Z: {avg_z:.4f}mm.")
-        self.log_to_console(f"INFO: Subtracting probe thickness of {probe_thickness:.4f}mm.")
-        self.log_to_console(f"INFO: Setting new Work Z-Offset to {final_z_offset:.4f}mm.")
-        self.log_to_console("INFO: The top of your workpiece is now Z=0.")
-        safe_retract_height = probe_thickness + 10
-        self.log_to_console(f"INFO: Retracting to a safe height of Z={safe_retract_height:.4f}mm.")
+            if not self.xyz_probe_stage: # Standard Z-Probe
+                safe_retract_height = probe_thickness + 10
+                self.probe_command_queue = [f"G10 L2 P1 Z{final_offset:.4f}", f"G90 G0 Z{safe_retract_height}"]
+            else: # 3-Axis Z-Probe
+                self.probe_command_queue = [
+                    f"G10 L2 P1 Z{final_offset:.4f}",
+                    "G91 G0 Z30",
+                    "G91 G0 X-25"
+                ]
+                self.xyz_probe_stage = 'X_TRANSITION'
+            self.send_next_probe_command()
 
-        self.probe_command_queue = [
-            f"G10 L2 P1 Z{final_z_offset:.4f}",
-            f"G0 Z{safe_retract_height}"
-        ]
-        self.send_next_probe_command()
+        elif self.xyz_probe_stage == 'X':
+            # Note: Probing is in the +X direction. The tool is to the left of the probe plate.
+            # The probed X position is workpiece_edge_X + tool_radius.
+            # Therefore, workpiece_edge_X = probed_X - tool_radius.
+            # The user has requested avg_pos + tool_radius, which is implemented below.
+            # This will likely result in the work offset being set incorrectly.
+            final_offset = avg_pos + tool_radius
+            self.log_to_console(f"INFO: X-Probe successful. Average: {avg_pos:.4f}mm. Setting X-Work-Offset.")
+            self.probe_command_queue = [
+                f"G10 L2 P1 X{final_offset:.4f}",
+                "G91 G0 X-30",
+                "G91 G0 Y25"
+            ]
+            self.xyz_probe_stage = 'Y_TRANSITION'
+            self.send_next_probe_command()
+        elif self.xyz_probe_stage == 'Y':
+            final_offset = avg_pos + tool_radius
+            self.log_to_console(f"INFO: Y-Probe successful. Average: {avg_pos:.4f}mm. Setting Y-Work-Offset.")
+            self.probe_command_queue = [
+                f"G10 L2 P1 Y{final_offset:.4f}"
+            ]
+            self.xyz_probe_stage = 'FINALIZE'
+            self.send_next_probe_command()
+
+    def handle_probe_transition(self):
+        if self.xyz_probe_stage == 'X_TRANSITION':
+            msg = "Probe Z complete. Reposition probe for X-axis probing (to the right of the tool) and press OK."
+            QMessageBox.information(self, "Probe Reposition", msg)
+            self.xyz_probe_stage = 'X'
+            self.execute_probe_stage()
+        elif self.xyz_probe_stage == 'Y_TRANSITION':
+            msg = "Probe X complete. Reposition probe for Y-axis probing (in front of the tool) and press OK."
+            QMessageBox.information(self, "Probe Reposition", msg)
+            self.xyz_probe_stage = 'Y'
+            self.execute_probe_stage()
+        elif self.xyz_probe_stage == 'FINALIZE':
+            self.log_to_console("INFO: 3-Axis Probing Complete. Finalizing...")
+            try:
+                z_max = self.grbl_setting_widgets['$132'].text()
+            except KeyError:
+                self.log_to_console("WARN: Z-Max ($132) not available. Reading from machine.")
+                self.send_command("$$")
+                QMessageBox.warning(self, "Z-Max Required", "Could not determine Z-Max ($132). Please ensure settings have been read from the machine, then try again.")
+                self.end_probe_cycle()
+                return
+
+            self.probe_command_queue = [
+                f"G90 G0 Z{z_max}",
+                "G90 G0 X0 Y0"
+            ]
+            self.xyz_probe_stage = 'DONE'
+            self.send_next_probe_command()
 
     def end_probe_cycle(self):
         if self.probe_phase == 'finalizing':
@@ -794,6 +865,7 @@ class MainWindow(QMainWindow):
         self.is_probing = False
         self.is_advanced_probing = False
         self.probe_phase = None
+        self.xyz_probe_stage = None
         self.probe_command_queue = []
         self.probe_results = []
         self.probe_response_count = 0
@@ -801,6 +873,74 @@ class MainWindow(QMainWindow):
         self.dro_timer.start()
 
         self.update_ui_states()
+
+    def run_3axis_probe_cycle(self):
+        self.is_manually_zeroed = False
+        self.z_is_auto_zeroed = False
+
+        arm_dialog = ProbeArmDialog(self)
+        arm_dialog.e_stop_button.clicked.connect(self.emergency_stop)
+        self.probe_status_changed.connect(arm_dialog.update_probe_status)
+        self.send_command("?")
+
+        try:
+            result = arm_dialog.exec_()
+            if result != QDialog.Accepted:
+                return
+        finally:
+            self.probe_status_changed.disconnect(arm_dialog.update_probe_status)
+
+        self.dro_timer.stop()
+        self.is_probing = True
+        self.is_advanced_probing = True
+        self.probe_succeeded = False
+        self.probe_results = []
+        self.probe_response_count = 0
+
+        self.xyz_probe_stage = 'Z'
+        self.execute_probe_stage()
+        self.update_ui_states()
+
+    def execute_probe_stage(self):
+        self.probe_phase = 'probing'
+        self.probe_results = []
+        self.probe_response_count = 0
+
+        try:
+            fast_feed = float(self.settings.value("probe/feedrate", "25"))
+            slow_feed = float(self.settings.value("probe/slow_feedrate", "10"))
+            retract_dist = float(self.settings.value("probe/retract_dist", "2"))
+            probe_dist = float(self.settings.value("probe/distance", "-25"))
+        except (ValueError, TypeError):
+            QMessageBox.critical(self, "Probe Error", "Invalid probe settings. Please check values in the Settings tab.")
+            self.end_probe_cycle()
+            return
+
+        axis = self.xyz_probe_stage
+
+        if axis == 'Z':
+            p_dist = probe_dist
+            r_dist = retract_dist
+        else:
+            p_dist = abs(probe_dist)
+            r_dist = -retract_dist
+
+        probe_commands = [
+            f"G91 G38.2 {axis}{p_dist} F{fast_feed}",
+            f"G91 G0 {axis}{r_dist}",
+            f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
+            f"G91 G0 {axis}{r_dist}",
+            f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
+            f"G91 G0 {axis}{r_dist}",
+            f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
+        ]
+
+        if axis == 'Y':
+            self.probe_command_queue = ["G91 G0 X45"] + probe_commands
+        else:
+            self.probe_command_queue = probe_commands
+
+        self.send_next_probe_command()
 
     def run_homing_cycle(self):
         self.is_homed = False
@@ -859,7 +999,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
         self.pause_button.setEnabled(is_connected and self.gcode_is_running)
         self.stop_button.setEnabled(is_connected and self.gcode_is_running)
-        for button in [self.home_button, self.unlock_button, self.run_probe_button, self.set_location_button, self.go_to_location_button, self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input]:
+        for button in [self.home_button, self.unlock_button, self.run_probe_button, self.run_3axis_probe_button, self.set_location_button, self.go_to_location_button, self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input]:
             button.setEnabled(is_connected)
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
 
@@ -908,16 +1048,28 @@ class MainWindow(QMainWindow):
         if self.machine_state == "Alarm":
             self.run_probe_button.setEnabled(False)
             self.run_probe_button.setText("Unlock to Probe")
+            self.run_3axis_probe_button.setEnabled(False)
+            self.run_3axis_probe_button.setText("Unlock to Probe")
         elif self.is_probing:
-            self.run_probe_button.setText("Probing...")
             self.run_probe_button.setEnabled(False)
+            self.run_3axis_probe_button.setEnabled(False)
+            if self.xyz_probe_stage:
+                self.run_probe_button.setText("Probing...")
+                self.run_3axis_probe_button.setText(f"Probing {self.xyz_probe_stage}...")
+            else:
+                self.run_probe_button.setText("Probing...")
+                self.run_3axis_probe_button.setText("Probing...")
         elif self.z_is_auto_zeroed:
             self.run_probe_button.setText("Z Zeroed")
             self.run_probe_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
             self.run_probe_button.setEnabled(is_connected)
+            self.run_3axis_probe_button.setEnabled(is_connected)
+            self.run_3axis_probe_button.setText("3-Axis XYZ Probe")
         else:
             self.run_probe_button.setText("Auto Zero Z")
             self.run_probe_button.setEnabled(is_connected)
+            self.run_3axis_probe_button.setText("3-Axis XYZ Probe")
+            self.run_3axis_probe_button.setEnabled(is_connected)
 
 
     def start_gcode(self):
@@ -1041,7 +1193,8 @@ class MainWindow(QMainWindow):
             "probe/feedrate": "25",
             "probe/thickness": "1.0",
             "probe/slow_feedrate": "10",
-            "probe/retract_dist": "2"
+            "probe/retract_dist": "2",
+            "probe/tool_radius": "3.15"
         }
         for key, widget in self.get_settings_widgets().items():
             widget.setText(self.settings.value(key, defaults.get(key)))
@@ -1086,7 +1239,8 @@ class MainWindow(QMainWindow):
             "probe/feedrate": self.probe_feed_input,
             "probe/thickness": self.probe_thickness_input,
             "probe/slow_feedrate": self.slow_probe_feed_input,
-            "probe/retract_dist": self.probe_retract_input
+            "probe/retract_dist": self.probe_retract_input,
+            "probe/tool_radius": self.tool_radius_input
         }
 
     def get_grbl_fields(self):
