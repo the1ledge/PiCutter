@@ -779,7 +779,7 @@ class MainWindow(QMainWindow):
 
         self.probe_phase = 'finalizing'
         avg_pos = sum(self.probe_results) / len(self.probe_results)
-
+        
         try:
             probe_thickness = float(self.settings.value("probe/thickness", 1.0))
             tool_radius = float(self.settings.value("probe/tool_radius", 3.15))
@@ -789,33 +789,28 @@ class MainWindow(QMainWindow):
             return
 
         if not self.xyz_probe_stage or self.xyz_probe_stage == 'Z':
-            final_offset = avg_pos - probe_thickness
+            final_offset = avg_pos + probe_thickness
             self.log_to_console(f"INFO: Z-Probe successful. Average: {avg_pos:.4f}mm. Setting Z-Work-Offset.")
-
+            
             if not self.xyz_probe_stage: # Standard Z-Probe
                 safe_retract_height = probe_thickness + 10
                 self.probe_command_queue = [f"G10 L2 P1 Z{final_offset:.4f}", f"G90 G0 Z{safe_retract_height}"]
             else: # 3-Axis Z-Probe
                 self.probe_command_queue = [
                     f"G10 L2 P1 Z{final_offset:.4f}",
-                    "G91 G0 Z30",
+                    "G91 G0 Z10",
                     "G91 G0 X-25"
                 ]
                 self.xyz_probe_stage = 'X_TRANSITION'
             self.send_next_probe_command()
 
         elif self.xyz_probe_stage == 'X':
-            # Note: Probing is in the +X direction. The tool is to the left of the probe plate.
-            # The probed X position is workpiece_edge_X + tool_radius.
-            # Therefore, workpiece_edge_X = probed_X - tool_radius.
-            # The user has requested avg_pos + tool_radius, which is implemented below.
-            # This will likely result in the work offset being set incorrectly.
             final_offset = avg_pos + tool_radius
             self.log_to_console(f"INFO: X-Probe successful. Average: {avg_pos:.4f}mm. Setting X-Work-Offset.")
             self.probe_command_queue = [
                 f"G10 L2 P1 X{final_offset:.4f}",
                 "G91 G0 X-30",
-                "G91 G0 Y25"
+                "G91 G0 Y-25"
             ]
             self.xyz_probe_stage = 'Y_TRANSITION'
             self.send_next_probe_command()
@@ -849,7 +844,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Z-Max Required", "Could not determine Z-Max ($132). Please ensure settings have been read from the machine, then try again.")
                 self.end_probe_cycle()
                 return
-
+            
             self.probe_command_queue = [
                 f"G90 G0 Z{z_max}",
                 "G90 G0 X0 Y0"
@@ -896,7 +891,7 @@ class MainWindow(QMainWindow):
         self.probe_succeeded = False
         self.probe_results = []
         self.probe_response_count = 0
-
+        
         self.xyz_probe_stage = 'Z'
         self.execute_probe_stage()
         self.update_ui_states()
@@ -917,14 +912,14 @@ class MainWindow(QMainWindow):
             return
 
         axis = self.xyz_probe_stage
-
+        
         if axis == 'Z':
             p_dist = probe_dist
             r_dist = retract_dist
         else:
             p_dist = abs(probe_dist)
             r_dist = -retract_dist
-
+        
         probe_commands = [
             f"G91 G38.2 {axis}{p_dist} F{fast_feed}",
             f"G91 G0 {axis}{r_dist}",
@@ -1039,10 +1034,6 @@ class MainWindow(QMainWindow):
                 self.unlock_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
             else:
                 self.unlock_button.setText("Unlock ($X)")
-
-        # --- SET ZERO BUTTON ---
-        # This logic has been removed and replaced by the new unified
-        # "Set Location" and "Go To Location" buttons.
 
         # --- PROBE BUTTON ---
         if self.machine_state == "Alarm":
