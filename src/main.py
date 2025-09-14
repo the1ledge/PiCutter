@@ -1,4 +1,4 @@
-# v0.14.2
+# v0.14.3
 import sys
 import serial.tools.list_ports
 import re
@@ -683,6 +683,7 @@ class MainWindow(QMainWindow):
             if len(parts) == 2: self.grbl_setting_received.emit(parts[0], parts[1])
         elif data.startswith("[PRB:"):
             if self.is_advanced_probing:
+                self.log_to_console(f"DEBUG: [PRB] response received. Full response: {data}")
                 self.probe_response_count += 1
                 prb_match = re.search(r"\[PRB:([\d.-]+),([\d.-]+),([\d.-]+):", data)
                 if prb_match:
@@ -696,6 +697,9 @@ class MainWindow(QMainWindow):
                         else: # Fallback for old probe cycle
                             val = float(prb_match.group(3))
                         self.probe_results.append(val)
+                        self.log_to_console(f"DEBUG: Stored probe result. Total results: {len(self.probe_results)}. Results list: {self.probe_results}")
+                    else:
+                        self.log_to_console("DEBUG: Ignored first (fast) probe result.")
             else:
                 self.is_probing = False
                 self.probe_succeeded = True
@@ -760,8 +764,10 @@ class MainWindow(QMainWindow):
     def send_next_probe_command(self):
         if self.probe_command_queue:
             command = self.probe_command_queue.pop(0)
+            self.log_to_console(f"DEBUG: Sending next probe command: '{command}'. Items left in queue: {len(self.probe_command_queue)}")
             self.send_command(command)
         else:
+            self.log_to_console(f"DEBUG: Probe command queue empty. Current phase: '{self.probe_phase}'.")
             if self.probe_phase == 'probing':
                 self.start_probe_finalization()
             elif self.probe_phase == 'finalizing':
@@ -771,6 +777,7 @@ class MainWindow(QMainWindow):
                     self.end_probe_cycle()
 
     def start_probe_finalization(self):
+        self.log_to_console(f"DEBUG: Starting probe finalization for stage '{self.xyz_probe_stage}'. Collected {len(self.probe_results)} results.")
         if len(self.probe_results) != 3:
             self.log_to_console(f"ERROR: Advanced probe failed. Expected 3 results, got {len(self.probe_results)}.")
             self.probe_succeeded = False
@@ -789,7 +796,8 @@ class MainWindow(QMainWindow):
             return
 
         if not self.xyz_probe_stage or self.xyz_probe_stage == 'Z':
-            final_offset = avg_pos + probe_thickness
+            final_offset = avg_pos - probe_thickness
+            self.log_to_console(f"DEBUG: Probe finalization successful for stage 'Z'. Average: {avg_pos:.4f}mm.")
             self.log_to_console(f"INFO: Z-Probe successful. Average: {avg_pos:.4f}mm. Setting Z-Work-Offset.")
             
             if not self.xyz_probe_stage: # Standard Z-Probe
@@ -806,6 +814,7 @@ class MainWindow(QMainWindow):
 
         elif self.xyz_probe_stage == 'X':
             final_offset = avg_pos + tool_radius
+            self.log_to_console(f"DEBUG: Probe finalization successful for stage 'X'. Average: {avg_pos:.4f}mm.")
             self.log_to_console(f"INFO: X-Probe successful. Average: {avg_pos:.4f}mm. Setting X-Work-Offset.")
             self.probe_command_queue = [
                 f"G10 L2 P1 X{final_offset:.4f}",
@@ -816,6 +825,7 @@ class MainWindow(QMainWindow):
             self.send_next_probe_command()
         elif self.xyz_probe_stage == 'Y':
             final_offset = avg_pos + tool_radius
+            self.log_to_console(f"DEBUG: Probe finalization successful for stage 'Y'. Average: {avg_pos:.4f}mm.")
             self.log_to_console(f"INFO: Y-Probe successful. Average: {avg_pos:.4f}mm. Setting Y-Work-Offset.")
             self.probe_command_queue = [
                 f"G10 L2 P1 Y{final_offset:.4f}"
@@ -836,23 +846,19 @@ class MainWindow(QMainWindow):
             self.execute_probe_stage()
         elif self.xyz_probe_stage == 'FINALIZE':
             self.log_to_console("INFO: 3-Axis Probing Complete. Finalizing...")
-            try:
-                z_max = self.grbl_setting_widgets['$132'].text()
-            except KeyError:
-                self.log_to_console("WARN: Z-Max ($132) not available. Reading from machine.")
-                self.send_command("$$")
-                QMessageBox.warning(self, "Z-Max Required", "Could not determine Z-Max ($132). Please ensure settings have been read from the machine, then try again.")
-                self.end_probe_cycle()
-                return
+            self.log_to_console("DEBUG: Moving to safe height using machine coordinates (G53).")
             
+            # Use G53 to move in machine coordinates to a known safe height (10mm below machine top)
+            # Then move to the WCS origin for X and Y.
             self.probe_command_queue = [
-                f"G90 G0 Z{z_max}",
+                "G53 G0 Z-10.0",
                 "G90 G0 X0 Y0"
             ]
             self.xyz_probe_stage = 'DONE'
             self.send_next_probe_command()
 
     def end_probe_cycle(self):
+        self.log_to_console(f"DEBUG: Probe cycle ending. Current Stage: {self.xyz_probe_stage}, Phase: {self.probe_phase}.")
         if self.probe_phase == 'finalizing':
             self.probe_succeeded = True
             self.z_is_auto_zeroed = True
@@ -870,6 +876,7 @@ class MainWindow(QMainWindow):
         self.update_ui_states()
 
     def run_3axis_probe_cycle(self):
+        self.log_to_console("DEBUG: 3-axis probe cycle initiated.")
         self.is_manually_zeroed = False
         self.z_is_auto_zeroed = False
 
@@ -897,6 +904,7 @@ class MainWindow(QMainWindow):
         self.update_ui_states()
 
     def execute_probe_stage(self):
+        self.log_to_console(f"DEBUG: Executing probe stage '{self.xyz_probe_stage}'.")
         self.probe_phase = 'probing'
         self.probe_results = []
         self.probe_response_count = 0
@@ -928,13 +936,15 @@ class MainWindow(QMainWindow):
             f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
             f"G91 G0 {axis}{r_dist}",
             f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
+            f"G91 G0 {axis}{r_dist}", # Final retraction to solve race condition
         ]
 
         if axis == 'Y':
             self.probe_command_queue = ["G91 G0 X45"] + probe_commands
         else:
             self.probe_command_queue = probe_commands
-
+        
+        self.log_to_console(f"DEBUG: Queued {len(self.probe_command_queue)} commands for stage '{self.xyz_probe_stage}': {self.probe_command_queue}")
         self.send_next_probe_command()
 
     def run_homing_cycle(self):
