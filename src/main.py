@@ -1,4 +1,4 @@
-# v0.14.3
+# v0.14.4
 import sys
 import serial.tools.list_ports
 import re
@@ -354,7 +354,16 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(manual_tab, "Manual Control")
         main_layout = QHBoxLayout(manual_tab)
 
-        # --- Left Column (Spindle & Actions) ---
+        # --- Create All Buttons First ---
+        self.home_button = QPushButton("Home ($H)")
+        self.unlock_button = QPushButton("Unlock ($X)")
+        self.run_probe_button = QPushButton("Auto Zero Z")
+        self.run_3axis_probe_button = QPushButton("3-Axis\nAuto Zero")
+        self.set_location_button = QPushButton("Set Location")
+        self.go_to_location_button = QPushButton("Go To Location")
+        self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
+
+        # --- Left Column (Spindle & Video Placeholder) ---
         left_column_layout = QVBoxLayout()
         left_column_layout.setAlignment(Qt.AlignTop)
 
@@ -363,32 +372,21 @@ class MainWindow(QMainWindow):
         self.spindle_speed_input = QLineEdit("1000")
         self.numpad_enabled_fields.append(self.spindle_speed_input)
         self.spindle_speed_input.installEventFilter(self)
-        self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
         spindle_layout.addRow("Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
         left_column_layout.addWidget(spindle_group)
 
-        actions_group = QGroupBox("Actions")
-        actions_layout = QVBoxLayout()
-        self.home_button, self.unlock_button = QPushButton("Home ($H)"), QPushButton("Unlock ($X)")
-        self.run_probe_button = QPushButton("Auto Zero Z")
-        self.run_3axis_probe_button = QPushButton("3-Axis XYZ Probe")
-        self.set_location_button = QPushButton("Set Location")
-        self.go_to_location_button = QPushButton("Go To Location")
+        video_placeholder = QLabel("Placeholder for video")
+        video_placeholder.setAlignment(Qt.AlignCenter)
+        video_placeholder.setStyleSheet("border: 1px solid black; background-color: #e0e0e0;")
+        video_placeholder.setMinimumSize(200, 200) # Approximate size
+        left_column_layout.addWidget(video_placeholder)
+        left_column_layout.addStretch(1)
 
-        actions_layout.addWidget(self.home_button)
-        actions_layout.addWidget(self.unlock_button)
-        actions_layout.addWidget(self.run_probe_button)
-        actions_layout.addWidget(self.run_3axis_probe_button)
-        actions_layout.addWidget(self.set_location_button)
-        actions_layout.addWidget(self.go_to_location_button)
-        actions_group.setLayout(actions_layout)
-        left_column_layout.addWidget(actions_group)
-        
         main_layout.addLayout(left_column_layout)
 
-        # --- Middle Column (DROs) ---
+        # --- Middle Column (DROs & Location Buttons) ---
         middle_column_layout = QVBoxLayout()
         middle_column_layout.setAlignment(Qt.AlignTop)
 
@@ -409,10 +407,17 @@ class MainWindow(QMainWindow):
         wpos_dro_layout.addRow("Z:", self.wpos_z_label)
         wpos_dro_group.setLayout(wpos_dro_layout)
         middle_column_layout.addWidget(wpos_dro_group)
+        
+        # Add location buttons directly to the QVBoxLayout to make them span the width
+        self.set_location_button.setFixedHeight(60)
+        self.go_to_location_button.setFixedHeight(60)
+        middle_column_layout.addWidget(self.set_location_button)
+        middle_column_layout.addWidget(self.go_to_location_button)
+        middle_column_layout.addStretch(1)
 
         main_layout.addLayout(middle_column_layout)
 
-        # --- Right Column (Jogging) ---
+        # --- Right Column (Jogging & Actions) ---
         right_column_layout = QVBoxLayout()
         
         jog_group = QGroupBox("Jogging")
@@ -427,7 +432,8 @@ class MainWindow(QMainWindow):
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
-        for button in [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]:
+        jog_buttons = [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]
+        for button in jog_buttons:
             button.setMinimumSize(60, 60)
         
         step_control_layout = QVBoxLayout()
@@ -448,8 +454,26 @@ class MainWindow(QMainWindow):
         jog_layout.setColumnStretch(0, 1)
         jog_layout.setRowStretch(5, 1)
         jog_layout.setRowStretch(0, 1)
-
         right_column_layout.addWidget(jog_group)
+
+        actions_group = QGroupBox("Actions")
+        actions_layout = QGridLayout()
+        actions_group.setLayout(actions_layout)
+        
+        action_buttons = [self.home_button, self.run_probe_button, self.run_3axis_probe_button, self.unlock_button]
+        for button in action_buttons:
+            button.setMinimumSize(60, 60)
+            button.setMaximumSize(80, 80)
+
+        actions_layout.addWidget(self.home_button, 0, 0)
+        actions_layout.addWidget(self.run_probe_button, 0, 1)
+        actions_layout.addWidget(self.run_3axis_probe_button, 0, 2)
+        # The unlock button was not explicitly requested to be moved, but its
+        # original container is now a video placeholder. It is a critical UI
+        # element and is placed here with the other machine actions.
+        actions_layout.addWidget(self.unlock_button, 0, 3)
+        
+        right_column_layout.addWidget(actions_group)
         right_column_layout.addStretch(1)
         main_layout.addLayout(right_column_layout)
 
@@ -1065,11 +1089,11 @@ class MainWindow(QMainWindow):
             self.run_probe_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
             self.run_probe_button.setEnabled(is_connected)
             self.run_3axis_probe_button.setEnabled(is_connected)
-            self.run_3axis_probe_button.setText("3-Axis XYZ Probe")
+            self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
         else:
             self.run_probe_button.setText("Auto Zero Z")
             self.run_probe_button.setEnabled(is_connected)
-            self.run_3axis_probe_button.setText("3-Axis XYZ Probe")
+            self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
             self.run_3axis_probe_button.setEnabled(is_connected)
 
 
