@@ -1,4 +1,4 @@
-# v0.14.4
+# v0.14.5
 import sys
 import serial.tools.list_ports
 import re
@@ -34,7 +34,7 @@ class ProbeVerifyDialog(QDialog):
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
-        self.e_stop_button = QPushButton("EMERGENCY STOP")
+        self.e_stop_button = QPushButton("EMERGENCY STOP\n(Reset)")
         self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
         self.e_stop_button.setFixedHeight(40)
 
@@ -87,7 +87,7 @@ class ProbeArmDialog(QDialog):
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
-        self.e_stop_button = QPushButton("EMERGENCY STOP")
+        self.e_stop_button = QPushButton("EMERGENCY STOP\n(Reset)")
         self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
         self.e_stop_button.setFixedHeight(40)
 
@@ -281,24 +281,25 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         top_bar_layout = QHBoxLayout()
-        self.e_stop_button = QPushButton("EMERGENCY STOP")
+        self.e_stop_button = QPushButton("EMERGENCY STOP\n(Reset)")
         self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
         self.e_stop_button.setFixedHeight(40)
         top_bar_layout.addWidget(self.e_stop_button)
-        connection_layout = QHBoxLayout()
+        self.unlock_button = QPushButton("Unlock ($X)")
+        self.unlock_button.setFixedHeight(40)
+        top_bar_layout.addWidget(self.unlock_button)
+        top_bar_layout.addStretch()
         self.connect_button = QPushButton("Connect")
-        connection_layout.addWidget(self.connect_button)
         self.connection_status_indicator = QPushButton("Disconnected")
         self.connection_status_indicator.setCheckable(False)
         self.connection_status_indicator.setEnabled(False)
-        connection_layout.addWidget(self.connection_status_indicator)
-        top_bar_layout.addLayout(connection_layout)
-        top_bar_layout.addStretch()
-        system_buttons_layout = QVBoxLayout()
+        system_buttons_layout = QGridLayout()
         self.exit_button = QPushButton("Exit Application")
         self.shutdown_button = QPushButton("Shutdown Pi")
-        system_buttons_layout.addWidget(self.exit_button)
-        system_buttons_layout.addWidget(self.shutdown_button)
+        system_buttons_layout.addWidget(self.connect_button, 0, 0)
+        system_buttons_layout.addWidget(self.exit_button, 0, 1)
+        system_buttons_layout.addWidget(self.connection_status_indicator, 1, 0)
+        system_buttons_layout.addWidget(self.shutdown_button, 1, 1)
         top_bar_layout.addLayout(system_buttons_layout)
         main_layout.addLayout(top_bar_layout)
         self.tabs = QTabWidget()
@@ -356,7 +357,6 @@ class MainWindow(QMainWindow):
 
         # --- Create All Buttons First ---
         self.home_button = QPushButton("Home ($H)")
-        self.unlock_button = QPushButton("Unlock ($X)")
         self.run_probe_button = QPushButton("Auto Zero Z")
         self.run_3axis_probe_button = QPushButton("3-Axis\nAuto Zero")
         self.set_location_button = QPushButton("Set Location")
@@ -460,7 +460,7 @@ class MainWindow(QMainWindow):
         actions_layout = QGridLayout()
         actions_group.setLayout(actions_layout)
         
-        action_buttons = [self.home_button, self.run_probe_button, self.run_3axis_probe_button, self.unlock_button]
+        action_buttons = [self.home_button, self.run_probe_button, self.run_3axis_probe_button]
         for button in action_buttons:
             button.setMinimumSize(60, 60)
             button.setMaximumSize(80, 80)
@@ -471,7 +471,6 @@ class MainWindow(QMainWindow):
         # The unlock button was not explicitly requested to be moved, but its
         # original container is now a video placeholder. It is a critical UI
         # element and is placed here with the other machine actions.
-        actions_layout.addWidget(self.unlock_button, 0, 3)
         
         right_column_layout.addWidget(actions_group)
         right_column_layout.addStretch(1)
@@ -511,6 +510,8 @@ class MainWindow(QMainWindow):
         self.send_button = QPushButton("Send")
         self.filter_ok_checkbox = QCheckBox("Filter ok/?")
         self.filter_pos_checkbox = QCheckBox("Filter position")
+        self.filter_ok_checkbox.setChecked(True)
+        self.filter_pos_checkbox.setChecked(True)
         input_layout.addWidget(self.command_input, 1)
         input_layout.addWidget(self.send_button)
         input_layout.addWidget(self.filter_ok_checkbox)
@@ -1313,4 +1314,4 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec_()) #Jules
