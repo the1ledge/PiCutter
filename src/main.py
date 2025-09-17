@@ -1,14 +1,69 @@
-# v0.14.5
+# v0.15.1
 import sys
 import serial.tools.list_ports
 import re
 import time
 import os
+import cv2
+import numpy as np
 from PySide2.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip
 )
-from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings, QEvent
-from PySide2.QtGui import QTextCursor
+from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings, QEvent, Slot
+from PySide2.QtGui import QTextCursor, QImage, QPixmap
+
+from picamera2 import Picamera2
+
+# =============================================================================
+# FINAL VERSION of CameraWorker with Format Correction
+# =============================================================================
+class CameraWorker(QThread):
+    frame_ready = Signal(QImage)
+    camera_error = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._is_running = True
+        self.picam2 = None
+
+    def run(self):
+        try:
+            self.picam2 = Picamera2()
+            # =============================================================================
+            # THE FIX: Configure the camera for headless operation AND a specific pixel format.
+            # =============================================================================
+            config = self.picam2.create_preview_configuration(
+                main={"format": "RGB888"} # <-- THIS IS THE CRITICAL LINE
+            )
+            self.picam2.configure(config)
+            # =============================================================================
+            self.picam2.start()
+            
+        except Exception as e:
+            error_msg = f"Error: Failed to initialize Picamera2: {e}"
+            self.camera_error.emit(error_msg)
+            return
+
+        time.sleep(1.0)
+
+        while self._is_running:
+            rgb_array = self.picam2.capture_array()
+            
+            if rgb_array is not None:
+                safe_array = rgb_array.copy()
+                h, w, ch = safe_array.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(safe_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                self.frame_ready.emit(qt_image.copy())
+
+            time.sleep(1/60) 
+
+        if self.picam2:
+            self.picam2.stop()
+
+    def stop(self):
+        self._is_running = False
+        self.wait()
 
 class ProbeVerifyDialog(QDialog):
     def __init__(self, parent=None):
@@ -349,6 +404,9 @@ class MainWindow(QMainWindow):
         self.populate_ports()
         self.update_connection_indicator(False)
         self.update_ui_states()
+        self.camera_thread = None
+        self.camera_worker = None
+        self.start_camera()
 
     def build_manual_control_tab(self):
         manual_tab = QWidget()
@@ -363,7 +421,7 @@ class MainWindow(QMainWindow):
         self.go_to_location_button = QPushButton("Go To Location")
         self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
 
-        # --- Left Column (Spindle & Video Placeholder) ---
+        # --- Left Column (Spindle & Video) ---
         left_column_layout = QVBoxLayout()
         left_column_layout.setAlignment(Qt.AlignTop)
 
@@ -377,11 +435,15 @@ class MainWindow(QMainWindow):
         spindle_group.setLayout(spindle_layout)
         left_column_layout.addWidget(spindle_group)
 
-        video_placeholder = QLabel("Placeholder for video")
-        video_placeholder.setAlignment(Qt.AlignCenter)
-        video_placeholder.setStyleSheet("border: 1px solid black; background-color: #e0e0e0;")
-        video_placeholder.setMinimumSize(200, 200) # Approximate size
-        left_column_layout.addWidget(video_placeholder)
+        video_group = QGroupBox("Camera")
+        video_layout = QVBoxLayout()
+        self.video_label = QLabel("Initializing Camera...")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setStyleSheet("border: 1px solid black; background-color: #333; color: white;")
+        self.video_label.setMinimumSize(320, 240)
+        video_layout.addWidget(self.video_label)
+        video_group.setLayout(video_layout)
+        left_column_layout.addWidget(video_group)
         left_column_layout.addStretch(1)
 
         main_layout.addLayout(left_column_layout)
@@ -408,7 +470,6 @@ class MainWindow(QMainWindow):
         wpos_dro_group.setLayout(wpos_dro_layout)
         middle_column_layout.addWidget(wpos_dro_group)
         
-        # Add location buttons directly to the QVBoxLayout to make them span the width
         self.set_location_button.setFixedHeight(60)
         self.go_to_location_button.setFixedHeight(60)
         middle_column_layout.addWidget(self.set_location_button)
@@ -468,9 +529,6 @@ class MainWindow(QMainWindow):
         actions_layout.addWidget(self.home_button, 0, 0)
         actions_layout.addWidget(self.run_probe_button, 0, 1)
         actions_layout.addWidget(self.run_3axis_probe_button, 0, 2)
-        # The unlock button was not explicitly requested to be moved, but its
-        # original container is now a video placeholder. It is a critical UI
-        # element and is placed here with the other machine actions.
         
         right_column_layout.addWidget(actions_group)
         right_column_layout.addStretch(1)
@@ -535,7 +593,6 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(content_widget)
         scroll_area.setWidget(content_widget)
 
-        # --- Left Column ---
         left_column_widget = QWidget()
         left_column_layout = QVBoxLayout(left_column_widget)
         left_column_layout.setContentsMargins(0, 0, 0, 0)
@@ -575,7 +632,6 @@ class MainWindow(QMainWindow):
             field.installEventFilter(self)
         left_column_layout.addStretch(1)
 
-        # --- Right Column (GRBL Settings) ---
         self.initial_grbl_settings = {}
         self.grbl_setting_widgets = {}
         grbl_group = QGroupBox("GRBL Settings")
@@ -585,11 +641,9 @@ class MainWindow(QMainWindow):
         self.grbl_layout.addWidget(read_button, 0, 0, 1, 4)
         grbl_group.setLayout(self.grbl_layout)
 
-        # Add columns to main layout
         layout.addWidget(left_column_widget, 1)
         layout.addWidget(grbl_group, 2)
 
-        # --- Save Button ---
         save_button = QPushButton("Save All Settings")
         save_button.clicked.connect(self.save_settings)
         tab_layout.addWidget(save_button)
@@ -623,6 +677,45 @@ class MainWindow(QMainWindow):
         self.grbl_setting_received.connect(self.update_grbl_setting)
         self.send_button.clicked.connect(self.send_console_command)
         self.command_input.returnPressed.connect(self.send_console_command)
+
+    @Slot(QImage)
+    def update_camera_feed(self, image):
+        pixmap = QPixmap.fromImage(image)
+        scaled_pixmap = pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.video_label.setPixmap(scaled_pixmap)
+
+    @Slot(str)
+    def handle_camera_error(self, error_message):
+        print(f"DEBUG: handle_camera_error received: '{error_message}'")
+        self.log_to_console(f"CAMERA_ERROR: {error_message}")
+        self.video_label.setText(f"{error_message}\n\nIs camera connected?\nIs libcamera running?")
+
+    def start_camera(self):
+        print("DEBUG: MainWindow.start_camera() called.")
+        if self.camera_thread and self.camera_thread.isRunning():
+            print("DEBUG: Camera thread already running.")
+            return
+
+        self.camera_thread = QThread(self)
+        self.camera_worker = CameraWorker()
+        self.camera_worker.moveToThread(self.camera_thread)
+
+        self.camera_thread.started.connect(self.camera_worker.run)
+        self.camera_worker.frame_ready.connect(self.update_camera_feed)
+        self.camera_worker.camera_error.connect(self.handle_camera_error)
+        self.camera_thread.finished.connect(self.camera_worker.deleteLater)
+        
+        print("DEBUG: Starting camera thread.")
+        self.camera_thread.start()
+
+    def stop_camera(self):
+        print("DEBUG: MainWindow.stop_camera() called.")
+        if self.camera_worker:
+            self.camera_worker.stop()
+        if self.camera_thread:
+            self.camera_thread.quit()
+            self.camera_thread.wait()
+            print("DEBUG: Camera thread finished waiting.")
 
     def log_to_console(self, message):
         if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'):
@@ -736,7 +829,6 @@ class MainWindow(QMainWindow):
     def run_probe_cycle(self):
         self.is_manually_zeroed = False
         self.z_is_auto_zeroed = False
-        # --- Step 2: Verify tool is armed ---
         arm_dialog = ProbeArmDialog(self)
         arm_dialog.e_stop_button.clicked.connect(self.emergency_stop)
         self.probe_status_changed.connect(arm_dialog.update_probe_status)
@@ -749,10 +841,8 @@ class MainWindow(QMainWindow):
         finally:
             self.probe_status_changed.disconnect(arm_dialog.update_probe_status)
 
-        # --- Command Queue Phase ---
         self.dro_timer.stop()
 
-        # --- Step 4: Build and Run the Advanced Probe Sequence ---
         self.is_probing = True
         self.is_advanced_probing = True
         self.probe_phase = 'probing'
@@ -873,8 +963,6 @@ class MainWindow(QMainWindow):
             self.log_to_console("INFO: 3-Axis Probing Complete. Finalizing...")
             self.log_to_console("DEBUG: Moving to safe height using machine coordinates (G53).")
             
-            # Use G53 to move in machine coordinates to a known safe height (10mm below machine top)
-            # Then move to the WCS origin for X and Y.
             self.probe_command_queue = [
                 "G53 G0 Z-10.0",
                 "G90 G0 X0 Y0"
@@ -986,14 +1074,14 @@ class MainWindow(QMainWindow):
         choice_index = LocationDialog.get_selected_index(self, "Set Location", locations, prompt)
 
         if choice_index == -1:
-            return # User cancelled
+            return
 
-        if choice_index < 6: # Corresponds to G54-G59
+        if choice_index < 6:
             p_number = choice_index + 1
             command = f"G10 L2 P{p_number} X{self.mpos_x} Y{self.mpos_y} Z{self.mpos_z}"
             self.send_command(command)
             self.log_to_console(f"INFO: Set work origin for G{53 + p_number} (P{p_number}).")
-        else: # Corresponds to Safe Position
+        else:
             self.send_command("G28.1")
             self.log_to_console("INFO: Current position saved as safe position (G28).")
 
@@ -1003,13 +1091,13 @@ class MainWindow(QMainWindow):
         choice_index = LocationDialog.get_selected_index(self, "Go To Location", locations, prompt)
 
         if choice_index == -1:
-            return # User cancelled
+            return
 
-        if choice_index < 6: # Corresponds to G54-G59
+        if choice_index < 6:
             wcs_command = f"G{54+choice_index}"
             self.send_command(wcs_command)
             self.send_command("G90 G0 X0 Y0")
-        else: # Corresponds to Safe Position
+        else:
             self.send_command("G28")
 
     def load_gcode_file(self):
@@ -1044,7 +1132,6 @@ class MainWindow(QMainWindow):
             self.is_homed = False
             self.is_manually_zeroed = False
 
-        # --- HOME BUTTON ---
         if self.machine_state == "Home":
             self.home_pulse_timer.start()
         else:
@@ -1054,7 +1141,6 @@ class MainWindow(QMainWindow):
             else:
                 self.home_button.setText("Home ($H)")
 
-        # --- UNLOCK BUTTON ---
         if self.machine_state == "Alarm":
             self.alarm_pulse_timer.start()
             if self.current_alarm_code in self.alarm_codes:
@@ -1070,7 +1156,6 @@ class MainWindow(QMainWindow):
             else:
                 self.unlock_button.setText("Unlock ($X)")
 
-        # --- PROBE BUTTON ---
         if self.machine_state == "Alarm":
             self.run_probe_button.setEnabled(False)
             self.run_probe_button.setText("Unlock to Probe")
@@ -1295,6 +1380,8 @@ class MainWindow(QMainWindow):
             os.system("sudo shutdown -h now")
 
     def closeEvent(self, event):
+        print("DEBUG: closeEvent triggered. Stopping camera and disconnecting serial.")
+        self.stop_camera()
         self.disconnect_serial()
         super().closeEvent(event)
 
@@ -1314,4 +1401,4 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_()) #Jules
+    sys.exit(app.exec_())
