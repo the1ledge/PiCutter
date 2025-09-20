@@ -1,22 +1,20 @@
-# v0.15.1
+# v0.16.6
 import sys
 import serial.tools.list_ports
 import re
 import time
 import os
 import cv2
+import math 
 import numpy as np
 from PySide2.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView
 )
 from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings, QEvent, Slot
-from PySide2.QtGui import QTextCursor, QImage, QPixmap
+from PySide2.QtGui import QTextCursor, QImage, QPixmap, QColor
 
 from picamera2 import Picamera2
 
-# =============================================================================
-# FINAL VERSION of CameraWorker with Format Correction
-# =============================================================================
 class CameraWorker(QThread):
     frame_ready = Signal(QImage)
     camera_error = Signal(str)
@@ -29,35 +27,21 @@ class CameraWorker(QThread):
     def run(self):
         try:
             self.picam2 = Picamera2()
-            # =============================================================================
-            # THE FIX: Configure the camera for headless operation AND a specific pixel format.
-            # =============================================================================
-            config = self.picam2.create_preview_configuration(
-                main={"format": "RGB888"} # <-- THIS IS THE CRITICAL LINE
-            )
+            config = self.picam2.create_preview_configuration(main={"format": "RGB888"})
             self.picam2.configure(config)
-            # =============================================================================
             self.picam2.start()
-            
         except Exception as e:
-            error_msg = f"Error: Failed to initialize Picamera2: {e}"
-            self.camera_error.emit(error_msg)
+            self.camera_error.emit(f"Error: Failed to initialize Picamera2: {e}")
             return
-
         time.sleep(1.0)
-
         while self._is_running:
             rgb_array = self.picam2.capture_array()
-            
             if rgb_array is not None:
-                safe_array = rgb_array.copy()
-                h, w, ch = safe_array.shape
+                h, w, ch = rgb_array.shape
                 bytes_per_line = ch * w
-                qt_image = QImage(safe_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-
             time.sleep(1/60) 
-
         if self.picam2:
             self.picam2.stop()
 
@@ -72,27 +56,22 @@ class ProbeVerifyDialog(QDialog):
         self.setModal(True)
         self.is_verified = False
         layout = QVBoxLayout(self)
-
         info_label = QLabel("Touch the probe to the contact plate.\nThe indicator should turn green.\nThen lift the probe to continue.")
         info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(info_label)
-
         self.indicator = QLabel("Probe Not Detected")
         self.indicator.setAlignment(Qt.AlignCenter)
         self.indicator.setStyleSheet("background-color: #F44336; color: white; font-weight: bold; padding: 10px; border-radius: 5px;")
         layout.addWidget(self.indicator)
-
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.ok_button = self.button_box.button(QDialogButtonBox.Ok)
         self.ok_button.setText("Continue")
         self.ok_button.setEnabled(False)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-
         self.e_stop_button = QPushButton("EMERGENCY STOP\n(Reset)")
         self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
         self.e_stop_button.setFixedHeight(40)
-
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.e_stop_button)
         button_layout.addWidget(self.button_box)
@@ -106,12 +85,7 @@ class ProbeVerifyDialog(QDialog):
         else:
             self.indicator.setText("Probe Not Detected")
             self.indicator.setStyleSheet("background-color: #F44336; color: white; font-weight: bold; padding: 10px; border-radius: 5px;")
-
-        if self.is_verified and not is_triggered:
-            self.ok_button.setEnabled(True)
-        else:
-            self.ok_button.setEnabled(False)
-
+        self.ok_button.setEnabled(self.is_verified and not is_triggered)
 
 class ProbeArmDialog(QDialog):
     def __init__(self, parent=None):
@@ -120,37 +94,29 @@ class ProbeArmDialog(QDialog):
         self.setModal(True)
         self.is_verified = False
         layout = QVBoxLayout(self)
-
-        instructions = (
-            "1. Attach the probe lead to the cutting bit.\n"
-            "2. Touch the bit to the contact plate to verify.\n"
-            "3. Lift the probe. The button will enable."
-        )
+        instructions = ("1. Attach the probe lead to the cutting bit.\n"
+                        "2. Touch the bit to the contact plate to verify.\n"
+                        "3. Lift the probe. The button will enable.")
         info_label = QLabel(instructions)
         info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(info_label)
-
         self.indicator = QLabel("Probe Not Detected")
         self.indicator.setAlignment(Qt.AlignCenter)
         self.indicator.setStyleSheet("background-color: #F44336; color: white; font-weight: bold; padding: 10px; border-radius: 5px;")
         layout.addWidget(self.indicator)
-
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.ok_button = self.button_box.button(QDialogButtonBox.Ok)
         self.ok_button.setText("Ready to Probe")
         self.ok_button.setEnabled(False)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-
         self.e_stop_button = QPushButton("EMERGENCY STOP\n(Reset)")
         self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
         self.e_stop_button.setFixedHeight(40)
-
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.e_stop_button)
         button_layout.addWidget(self.button_box)
         layout.addLayout(button_layout)
-
 
     def update_probe_status(self, is_triggered):
         if is_triggered:
@@ -160,12 +126,7 @@ class ProbeArmDialog(QDialog):
         else:
             self.indicator.setText("Probe Not Detected")
             self.indicator.setStyleSheet("background-color: #F44336; color: white; font-weight: bold; padding: 10px; border-radius: 5px;")
-
-        if self.is_verified and not is_triggered:
-            self.ok_button.setEnabled(True)
-        else:
-            self.ok_button.setEnabled(False)
-
+        self.ok_button.setEnabled(self.is_verified and not is_triggered)
 
 class LocationDialog(QDialog):
     def __init__(self, parent, title, locations, prompt):
@@ -173,14 +134,11 @@ class LocationDialog(QDialog):
         self.setWindowTitle(title)
         self.setModal(True)
         self.selected_index = -1
-
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(prompt))
-
         self.location_combo = QComboBox()
         self.location_combo.addItems(locations)
         layout.addWidget(self.location_combo)
-
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
@@ -193,85 +151,71 @@ class LocationDialog(QDialog):
     @staticmethod
     def get_selected_index(parent, title, locations, prompt):
         dialog = LocationDialog(parent, title, locations, prompt)
-        if dialog.exec_() == QDialog.Accepted:
-            return dialog.selected_index
-        return -1
-
+        return dialog.selected_index if dialog.exec_() == QDialog.Accepted else -1
 
 class NumberPadDialog(QDialog):
     def __init__(self, initial_value="", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Number Pad")
         self.setModal(True)
-
         layout = QGridLayout(self)
-
         self.display = QLineEdit(initial_value)
         self.display.setReadOnly(True)
         self.display.setAlignment(Qt.AlignRight)
         layout.addWidget(self.display, 0, 0, 1, 4)
-
-        button_map = {
-            '7': (1, 0), '8': (1, 1), '9': (1, 2),
-            '4': (2, 0), '5': (2, 1), '6': (2, 2),
-            '1': (3, 0), '2': (3, 1), '3': (3, 2),
-            '0': (4, 0), '.': (4, 1),
-            'Backspace': (1, 3), 'Clear': (2, 3),
-            'Enter': (3, 3), 'Cancel': (4, 3)
-        }
-
+        button_map = {'7':(1,0),'8':(1,1),'9':(1,2),'4':(2,0),'5':(2,1),'6':(2,2),'1':(3,0),'2':(3,1),'3':(3,2),'0':(4,0),'.':(4,1),'Backspace':(1,3),'Clear':(2,3),'Enter':(3,3),'Cancel':(4,3)}
         for text, pos in button_map.items():
             button = QPushButton(text)
-            if text.isdigit() or text == '.':
-                button.clicked.connect(self.on_digit_pressed)
-            elif text == 'Backspace':
-                button.clicked.connect(self.on_backspace_pressed)
-            elif text == 'Clear':
-                button.clicked.connect(self.on_clear_pressed)
-            elif text == 'Enter':
-                button.clicked.connect(self.accept)
-            elif text == 'Cancel':
-                button.clicked.connect(self.reject)
+            if text.isdigit() or text=='.': button.clicked.connect(self.on_digit_pressed)
+            elif text=='Backspace': button.clicked.connect(self.on_backspace_pressed)
+            elif text=='Clear': button.clicked.connect(self.on_clear_pressed)
+            elif text=='Enter': button.clicked.connect(self.accept)
+            elif text=='Cancel': button.clicked.connect(self.reject)
             layout.addWidget(button, pos[0], pos[1])
 
     def on_digit_pressed(self):
         button = self.sender()
-        if button.text() == '.' and '.' in self.display.text():
-            return
-        new_text = self.display.text() + button.text()
-        self.display.setText(new_text)
+        if button.text() == '.' and '.' in self.display.text(): return
+        self.display.setText(self.display.text() + button.text())
 
-    def on_backspace_pressed(self):
-        self.display.setText(self.display.text()[:-1])
-
-    def on_clear_pressed(self):
-        self.display.clear()
-
-    def get_value(self):
-        return self.display.text()
-
+    def on_backspace_pressed(self): self.display.setText(self.display.text()[:-1])
+    def on_clear_pressed(self): self.display.clear()
+    def get_value(self): return self.display.text()
 
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
-
     def __init__(self, serial_connection):
         super().__init__()
         self.serial_connection = serial_connection
         self._is_running = True
-
     def run(self):
         while self._is_running:
             if self.serial_connection and self.serial_connection.is_open:
                 try:
                     line = self.serial_connection.readline().decode('utf-8').strip()
-                    if line:
-                        self.serial_data_received.emit(line)
-                except serial.SerialException:
-                    break
-        print("Serial worker finished.")
+                    if line: self.serial_data_received.emit(line)
+                except serial.SerialException: break
+    def stop(self): self._is_running = False
 
+class MockSerialWorker(QObject):
+    serial_data_received = Signal(str)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.send_ok_response)
+        self.is_open = True
+    @Slot(str)
+    def send_command(self, command):
+        if not self.is_open: return
+        delay = 50
+        if "G0" in command: delay = 100
+        if "$J" in command: delay = 200
+        self.timer.start(delay)
+    def send_ok_response(self): self.serial_data_received.emit("ok")
     def stop(self):
-        self._is_running = False
+        self.timer.stop()
+        self.is_open = False
 
 class MainWindow(QMainWindow):
     grbl_setting_received = Signal(str, str)
@@ -279,18 +223,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.alarm_codes = {
-            1: "Hard limit triggered. Position Lost.",
-            2: "Soft limit alarm, position kept. Unlock is Safe.",
-            3: "Reset while in motion. Position lost.",
-            4: "Probe fail. Probe not in expected initial state.",
-            5: "Probe fail. Probe did not contact the work.",
-            6: "Homing fail. The active homing cycle was reset.",
-            7: "Homing fail. Door opened during homing cycle.",
-            8: "Homing fail. Pull off failed to clear limit switch.",
-            9: "Homing fail. Could not find limit switch.",
-            15: "Jog target exceeds machine travel."
-        }
+        self.alarm_codes = {1:"Hard limit.",2:"Soft limit.",3:"Reset in motion.",4:"Probe fail (initial).",5:"Probe fail (no contact).",6:"Homing fail (reset).",7:"Homing fail (door).",8:"Homing fail (pull-off).",9:"Homing fail (no switch).",15:"Jog exceeds travel."}
+        
+        # --- THIS IS THE CORRECTED, COMPLETE DICTIONARY ---
         self.GRBL_SETTINGS_INFO = {
             "$0": {"label": "Step pulse time (μs)", "tooltip": "Sets the step pulse duration. A value around 10 microseconds is recommended."},
             "$1": {"label": "Step idle delay (ms)", "tooltip": "Delays disabling steppers after a motion. Set to 255 to keep steppers always enabled."},
@@ -327,6 +262,7 @@ class MainWindow(QMainWindow):
             "$131": {"label": "Y-axis max travel (mm)", "tooltip": "Maximum travel for the Y-axis. Used for soft limits."},
             "$132": {"label": "Z-axis max travel (mm)", "tooltip": "Maximum travel for the Z-axis. Used for soft limits."}
         }
+
         self.setWindowTitle("PiGRBL CNC Controller")
         self.resize(800, 480)
         QApplication.setStyle("Fusion")
@@ -390,6 +326,9 @@ class MainWindow(QMainWindow):
         self.wco_x, self.wco_y, self.wco_z = 0.0, 0.0, 0.0
         self.mpos_x, self.mpos_y, self.mpos_z = 0.0, 0.0, 0.0
         self.grbl_settings_count = 0
+        self.gcode_start_time = None
+        self.gcode_estimated_time = 0
+        self.gcode_line_times = []
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
@@ -412,19 +351,14 @@ class MainWindow(QMainWindow):
         manual_tab = QWidget()
         self.tabs.addTab(manual_tab, "Manual Control")
         main_layout = QHBoxLayout(manual_tab)
-
-        # --- Create All Buttons First ---
         self.home_button = QPushButton("Home ($H)")
         self.run_probe_button = QPushButton("Auto Zero Z")
         self.run_3axis_probe_button = QPushButton("3-Axis\nAuto Zero")
         self.set_location_button = QPushButton("Set Location")
         self.go_to_location_button = QPushButton("Go To Location")
         self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
-
-        # --- Left Column (Spindle & Video) ---
         left_column_layout = QVBoxLayout()
         left_column_layout.setAlignment(Qt.AlignTop)
-
         spindle_group = QGroupBox("Spindle")
         spindle_layout = QFormLayout()
         self.spindle_speed_input = QLineEdit("1000")
@@ -434,8 +368,7 @@ class MainWindow(QMainWindow):
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
         left_column_layout.addWidget(spindle_group)
-
-        video_group = QGroupBox("Camera")
+        video_group = QGroupBox()
         video_layout = QVBoxLayout()
         self.video_label = QLabel("Initializing Camera...")
         self.video_label.setAlignment(Qt.AlignCenter)
@@ -445,14 +378,10 @@ class MainWindow(QMainWindow):
         video_group.setLayout(video_layout)
         left_column_layout.addWidget(video_group)
         left_column_layout.addStretch(1)
-
         main_layout.addLayout(left_column_layout)
-
-        # --- Middle Column (DROs & Location Buttons) ---
         middle_column_layout = QVBoxLayout()
         middle_column_layout.setAlignment(Qt.AlignTop)
-
-        dro_group = QGroupBox("DRO (Machine Pos)")
+        dro_group = QGroupBox("Machine Pos")
         dro_layout = QFormLayout()
         self.x_pos_label, self.y_pos_label, self.z_pos_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
         dro_layout.addRow("X:", self.x_pos_label)
@@ -460,8 +389,7 @@ class MainWindow(QMainWindow):
         dro_layout.addRow("Z:", self.z_pos_label)
         dro_group.setLayout(dro_layout)
         middle_column_layout.addWidget(dro_group)
-
-        wpos_dro_group = QGroupBox("DRO (Work Pos)")
+        wpos_dro_group = QGroupBox("Work Pos")
         wpos_dro_layout = QFormLayout()
         self.wpos_x_label, self.wpos_y_label, self.wpos_z_label = QLabel("0.000"), QLabel("0.000"), QLabel("0.000")
         wpos_dro_layout.addRow("X:", self.wpos_x_label)
@@ -469,23 +397,18 @@ class MainWindow(QMainWindow):
         wpos_dro_layout.addRow("Z:", self.wpos_z_label)
         wpos_dro_group.setLayout(wpos_dro_layout)
         middle_column_layout.addWidget(wpos_dro_group)
-        
         self.set_location_button.setFixedHeight(60)
         self.go_to_location_button.setFixedHeight(60)
         middle_column_layout.addWidget(self.set_location_button)
         middle_column_layout.addWidget(self.go_to_location_button)
         middle_column_layout.addStretch(1)
-
         main_layout.addLayout(middle_column_layout)
-
-        # --- Right Column (Jogging & Actions) ---
         right_column_layout = QVBoxLayout()
-        
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
         jog_layout.setSpacing(0)
         jog_group.setLayout(jog_layout)
-        jog_group.layout().setContentsMargins(10,10,10,10)
+        jog_group.layout().setContentsMargins(10, 10, 10, 10)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         self.step_size_combo.setMinimumWidth(40)
@@ -496,14 +419,12 @@ class MainWindow(QMainWindow):
         jog_buttons = [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]
         for button in jog_buttons:
             button.setMinimumSize(60, 60)
-        
         step_control_layout = QVBoxLayout()
         step_control_layout.setSpacing(0)
         step_label = QLabel("Step")
         step_label.setAlignment(Qt.AlignCenter)
         step_control_layout.addWidget(step_label)
         step_control_layout.addWidget(self.step_size_combo)
-
         jog_layout.addWidget(self.x_minus_button, 2, 1)
         jog_layout.addWidget(self.x_plus_button, 2, 3)
         jog_layout.addLayout(step_control_layout, 2, 2)
@@ -516,28 +437,25 @@ class MainWindow(QMainWindow):
         jog_layout.setRowStretch(5, 1)
         jog_layout.setRowStretch(0, 1)
         right_column_layout.addWidget(jog_group)
-
-        actions_group = QGroupBox("Actions")
+        actions_group = QGroupBox()
         actions_layout = QGridLayout()
         actions_group.setLayout(actions_layout)
-        
         action_buttons = [self.home_button, self.run_probe_button, self.run_3axis_probe_button]
         for button in action_buttons:
             button.setMinimumSize(60, 60)
             button.setMaximumSize(80, 80)
-
         actions_layout.addWidget(self.home_button, 0, 0)
         actions_layout.addWidget(self.run_probe_button, 0, 1)
         actions_layout.addWidget(self.run_3axis_probe_button, 0, 2)
-        
         right_column_layout.addWidget(actions_group)
         right_column_layout.addStretch(1)
         main_layout.addLayout(right_column_layout)
 
     def build_gcode_tab(self):
         gcode_tab = QWidget()
-        gcode_layout = QVBoxLayout(gcode_tab)
         self.tabs.addTab(gcode_tab, "G-Code Sender")
+        main_gcode_layout = QHBoxLayout(gcode_tab)
+        left_panel_layout = QVBoxLayout()
         gcode_group = QGroupBox("G-Code File")
         gcode_group_layout = QVBoxLayout()
         gcode_file_layout = QHBoxLayout()
@@ -553,11 +471,27 @@ class MainWindow(QMainWindow):
         gcode_actions_layout.addWidget(self.stop_button)
         gcode_actions_layout.addStretch()
         gcode_group_layout.addLayout(gcode_file_layout)
-        gcode_group_layout.addWidget(self.gcode_progress)
         gcode_group_layout.addLayout(gcode_actions_layout)
+        gcode_group_layout.addWidget(self.gcode_progress)
         gcode_group.setLayout(gcode_group_layout)
-        gcode_layout.addWidget(gcode_group)
-        gcode_layout.addStretch()
+        left_panel_layout.addWidget(gcode_group)
+        self.gcode_table = QTableWidget()
+        self.gcode_table.setColumnCount(3)
+        self.gcode_table.setHorizontalHeaderLabels(["Line #", "Command", "Status"])
+        self.gcode_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.gcode_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.gcode_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.gcode_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        left_panel_layout.addWidget(self.gcode_table)
+        video_group = QGroupBox()
+        video_layout = QVBoxLayout()
+        self.gcode_video_label = QLabel("Initializing Camera...")
+        self.gcode_video_label.setAlignment(Qt.AlignCenter)
+        self.gcode_video_label.setStyleSheet("border: 1px solid black; background-color: #333; color: white;")
+        video_layout.addWidget(self.gcode_video_label)
+        video_group.setLayout(video_layout)
+        main_gcode_layout.addLayout(left_panel_layout, 1)
+        main_gcode_layout.addWidget(video_group, 1)
 
     def build_console_tab(self):
         console_tab = QWidget()
@@ -584,19 +518,15 @@ class MainWindow(QMainWindow):
         settings_tab = QWidget()
         self.tabs.addTab(settings_tab, "Settings")
         tab_layout = QVBoxLayout(settings_tab)
-
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         tab_layout.addWidget(scroll_area)
-
         content_widget = QWidget()
         layout = QHBoxLayout(content_widget)
         scroll_area.setWidget(content_widget)
-
         left_column_widget = QWidget()
         left_column_layout = QVBoxLayout(left_column_widget)
         left_column_layout.setContentsMargins(0, 0, 0, 0)
-
         connection_settings_group = QGroupBox("Serial Connection")
         connection_settings_layout = QFormLayout()
         self.port_combobox = QComboBox()
@@ -604,12 +534,13 @@ class MainWindow(QMainWindow):
         self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
         self.baud_combobox.setCurrentText("115200")
         self.refresh_button = QPushButton("Refresh Port List")
+        self.mock_grbl_checkbox = QCheckBox("Use Mock GRBL")
         connection_settings_layout.addRow("Port:", self.port_combobox)
         connection_settings_layout.addRow("Baud Rate:", self.baud_combobox)
         connection_settings_layout.addRow(self.refresh_button)
+        connection_settings_layout.addRow(self.mock_grbl_checkbox)
         connection_settings_group.setLayout(connection_settings_layout)
         left_column_layout.addWidget(connection_settings_group)
-
         probe_group = QGroupBox("Probe Settings")
         probe_layout = QFormLayout()
         self.probe_dist_input, self.probe_feed_input, self.probe_thickness_input = QLineEdit(), QLineEdit(), QLineEdit()
@@ -622,16 +553,11 @@ class MainWindow(QMainWindow):
         probe_layout.addRow("Tool Radius (mm):", self.tool_radius_input)
         probe_group.setLayout(probe_layout)
         left_column_layout.addWidget(probe_group)
-        probe_fields = [
-            self.probe_dist_input, self.probe_feed_input,
-            self.slow_probe_feed_input, self.probe_retract_input,
-            self.probe_thickness_input, self.tool_radius_input
-        ]
+        probe_fields = [self.probe_dist_input, self.probe_feed_input, self.slow_probe_feed_input, self.probe_retract_input, self.probe_thickness_input, self.tool_radius_input]
         self.numpad_enabled_fields.extend(probe_fields)
         for field in probe_fields:
             field.installEventFilter(self)
         left_column_layout.addStretch(1)
-
         self.initial_grbl_settings = {}
         self.grbl_setting_widgets = {}
         grbl_group = QGroupBox("GRBL Settings")
@@ -640,37 +566,34 @@ class MainWindow(QMainWindow):
         read_button.clicked.connect(lambda: self.send_command("$$"))
         self.grbl_layout.addWidget(read_button, 0, 0, 1, 4)
         grbl_group.setLayout(self.grbl_layout)
-
         layout.addWidget(left_column_widget, 1)
         layout.addWidget(grbl_group, 2)
-
         save_button = QPushButton("Save All Settings")
         save_button.clicked.connect(self.save_settings)
         tab_layout.addWidget(save_button)
-
         self.load_settings()
 
     def connect_signals(self):
         self.refresh_button.clicked.connect(self.populate_ports)
         self.connect_button.clicked.connect(self.toggle_connection)
-        self.x_plus_button.clicked.connect(lambda: self.send_jog_command("X", 1, self.x_plus_button))
-        self.x_minus_button.clicked.connect(lambda: self.send_jog_command("X", -1, self.x_minus_button))
-        self.y_plus_button.clicked.connect(lambda: self.send_jog_command("Y", 1, self.y_plus_button))
-        self.y_minus_button.clicked.connect(lambda: self.send_jog_command("Y", -1, self.y_minus_button))
-        self.z_plus_button.clicked.connect(lambda: self.send_jog_command("Z", 1, self.z_plus_button))
-        self.z_minus_button.clicked.connect(lambda: self.send_jog_command("Z", -1, self.z_minus_button))
+        self.x_plus_button.clicked.connect(lambda:self.send_jog_command("X",1,self.x_plus_button))
+        self.x_minus_button.clicked.connect(lambda:self.send_jog_command("X",-1,self.x_minus_button))
+        self.y_plus_button.clicked.connect(lambda:self.send_jog_command("Y",1,self.y_plus_button))
+        self.y_minus_button.clicked.connect(lambda:self.send_jog_command("Y",-1,self.y_minus_button))
+        self.z_plus_button.clicked.connect(lambda:self.send_jog_command("Z",1,self.z_plus_button))
+        self.z_minus_button.clicked.connect(lambda:self.send_jog_command("Z",-1,self.z_minus_button))
         self.load_file_button.clicked.connect(self.load_gcode_file)
         self.start_button.clicked.connect(self.start_gcode)
         self.pause_button.clicked.connect(self.pause_gcode)
         self.stop_button.clicked.connect(self.stop_gcode)
         self.home_button.clicked.connect(self.run_homing_cycle)
-        self.unlock_button.clicked.connect(lambda: self.send_command("$X"))
+        self.unlock_button.clicked.connect(lambda:self.send_command("$X"))
         self.set_location_button.clicked.connect(self.set_location)
         self.go_to_location_button.clicked.connect(self.go_to_location)
         self.run_probe_button.clicked.connect(self.run_probe_cycle)
         self.run_3axis_probe_button.clicked.connect(self.run_3axis_probe_cycle)
         self.spindle_on_button.clicked.connect(self.spindle_on)
-        self.spindle_off_button.clicked.connect(lambda: self.send_command("M5"))
+        self.spindle_off_button.clicked.connect(lambda:self.send_command("M5"))
         self.exit_button.clicked.connect(self.close)
         self.shutdown_button.clicked.connect(self.shutdown_pi)
         self.e_stop_button.clicked.connect(self.emergency_stop)
@@ -681,47 +604,36 @@ class MainWindow(QMainWindow):
     @Slot(QImage)
     def update_camera_feed(self, image):
         pixmap = QPixmap.fromImage(image)
-        scaled_pixmap = pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.video_label.setPixmap(scaled_pixmap)
+        if hasattr(self, 'video_label') and self.video_label.isVisible():
+            self.video_label.setPixmap(pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if hasattr(self, 'gcode_video_label') and self.gcode_video_label.isVisible():
+            self.gcode_video_label.setPixmap(pixmap.scaled(self.gcode_video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     @Slot(str)
     def handle_camera_error(self, error_message):
-        print(f"DEBUG: handle_camera_error received: '{error_message}'")
         self.log_to_console(f"CAMERA_ERROR: {error_message}")
         self.video_label.setText(f"{error_message}\n\nIs camera connected?\nIs libcamera running?")
 
     def start_camera(self):
-        print("DEBUG: MainWindow.start_camera() called.")
-        if self.camera_thread and self.camera_thread.isRunning():
-            print("DEBUG: Camera thread already running.")
-            return
-
+        if self.camera_thread and self.camera_thread.isRunning(): return
         self.camera_thread = QThread(self)
         self.camera_worker = CameraWorker()
         self.camera_worker.moveToThread(self.camera_thread)
-
         self.camera_thread.started.connect(self.camera_worker.run)
         self.camera_worker.frame_ready.connect(self.update_camera_feed)
         self.camera_worker.camera_error.connect(self.handle_camera_error)
         self.camera_thread.finished.connect(self.camera_worker.deleteLater)
-        
-        print("DEBUG: Starting camera thread.")
         self.camera_thread.start()
 
     def stop_camera(self):
-        print("DEBUG: MainWindow.stop_camera() called.")
-        if self.camera_worker:
-            self.camera_worker.stop()
+        if self.camera_worker: self.camera_worker.stop()
         if self.camera_thread:
             self.camera_thread.quit()
             self.camera_thread.wait()
-            print("DEBUG: Camera thread finished waiting.")
 
     def log_to_console(self, message):
-        if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'):
-            return
-        if self.filter_pos_checkbox.isChecked() and message.startswith('RX: <') and 'MPos:' in message:
-            return
+        if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'): return
+        if self.filter_pos_checkbox.isChecked() and message.startswith('RX: <') and 'MPos:' in message: return
         self.console_output.moveCursor(QTextCursor.Start)
         self.console_output.insertPlainText(message + '\n')
 
@@ -731,7 +643,6 @@ class MainWindow(QMainWindow):
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
                 self.is_homed = True
-
             state_match = re.search(r"<([^|:]+)", data)
             if state_match:
                 new_state = state_match.group(1)
@@ -739,49 +650,44 @@ class MainWindow(QMainWindow):
                     self.machine_state = new_state
                     if self.machine_state == "Alarm":
                         alarm_match = re.search(r"Alarm:(\d+)", data)
-                        if alarm_match:
-                            self.current_alarm_code = int(alarm_match.group(1))
+                        if alarm_match: self.current_alarm_code = int(alarm_match.group(1))
                         self.is_probing = False
                     else:
                         self.current_alarm_code = None
                     self.update_ui_states()
-
             probe_match = re.search(r"\|Pn:([^|]+)", data)
-            probe_triggered = False
-            if probe_match:
-                if 'P' in probe_match.group(1):
-                    probe_triggered = True
+            probe_triggered = 'P' in probe_match.group(1) if probe_match else False
             self.last_probe_state = probe_triggered
             self.probe_status_changed.emit(probe_triggered)
-
             pos_match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
             if pos_match:
-                self.mpos_x, self.mpos_y, self.mpos_z = (float(c) for c in pos_match.groups())
+                self.mpos_x,self.mpos_y,self.mpos_z = (float(c) for c in pos_match.groups())
                 self.x_pos_label.setText(f"{self.mpos_x:.3f}")
                 self.y_pos_label.setText(f"{self.mpos_y:.3f}")
                 self.z_pos_label.setText(f"{self.mpos_z:.3f}")
-
                 wco_match = re.search(r"WCO:([\d.-]+),([\d.-]+),([\d.-]+)", data)
                 if wco_match:
-                    self.wco_x, self.wco_y, self.wco_z = (float(c) for c in wco_match.groups())
-
-                wpos_x = self.mpos_x - self.wco_x
-                wpos_y = self.mpos_y - self.wco_y
-                wpos_z = self.mpos_z - self.wco_z
+                    self.wco_x,self.wco_y,self.wco_z = (float(c) for c in wco_match.groups())
+                wpos_x,wpos_y,wpos_z = self.mpos_x-self.wco_x, self.mpos_y-self.wco_y, self.mpos_z-self.wco_z
                 self.wpos_x_label.setText(f"{wpos_x:.3f}")
                 self.wpos_y_label.setText(f"{wpos_y:.3f}")
                 self.wpos_z_label.setText(f"{wpos_z:.3f}")
-
         elif data.lower() == "ok":
             if self.is_advanced_probing:
                 self.send_next_probe_command()
             elif self.gcode_is_running:
+                executed_line_index = self.gcode_current_line - 1
+                if executed_line_index >= 0:
+                    item = QTableWidgetItem("Executed")
+                    self.gcode_table.setItem(executed_line_index, 2, item)
+                    self.gcode_table.item(executed_line_index, 2).setBackground(QColor("lightgreen"))
+                    self.update_progress_display()
                 self.send_next_gcode_line()
         elif data.startswith("error:15"):
             if self.last_jog_button:
                 self.flash_jog_button(self.last_jog_button)
-                self.last_jog_button = None # Reset it
-            self.log_to_console(f"ERROR: {self.alarm_codes.get(15, 'Jog target exceeds machine travel.')}")
+                self.last_jog_button = None
+            self.log_to_console(f"ERROR: {self.alarm_codes.get(15, 'Jog target exceeds travel.')}")
         elif data.startswith("ALARM:"):
             try:
                 code = int(data.split(':')[1])
@@ -795,30 +701,20 @@ class MainWindow(QMainWindow):
                 self.log_to_console(f"ALARM: {self.alarm_codes.get(code, 'Unknown alarm code.')}")
             except (ValueError, IndexError):
                 self.log_to_console(f"Could not parse alarm code from: {data}")
-
         elif data.startswith("$"):
             parts = data.split("=")
             if len(parts) == 2: self.grbl_setting_received.emit(parts[0], parts[1])
         elif data.startswith("[PRB:"):
             if self.is_advanced_probing:
-                self.log_to_console(f"DEBUG: [PRB] response received. Full response: {data}")
                 self.probe_response_count += 1
                 prb_match = re.search(r"\[PRB:([\d.-]+),([\d.-]+),([\d.-]+):", data)
-                if prb_match:
-                    if self.probe_response_count > 1: # Ignore the first fast probe result
-                        if self.xyz_probe_stage == 'Z':
-                            val = float(prb_match.group(3))
-                        elif self.xyz_probe_stage == 'X':
-                            val = float(prb_match.group(1))
-                        elif self.xyz_probe_stage == 'Y':
-                            val = float(prb_match.group(2))
-                        else: # Fallback for old probe cycle
-                            val = float(prb_match.group(3))
-                        self.probe_results.append(val)
-                        self.log_to_console(f"DEBUG: Stored probe result. Total results: {len(self.probe_results)}. Results list: {self.probe_results}")
-                    else:
-                        self.log_to_console("DEBUG: Ignored first (fast) probe result.")
-            else:
+                if prb_match and self.probe_response_count > 1: # Ignore fast probe
+                    if self.xyz_probe_stage == 'Z': val = float(prb_match.group(3))
+                    elif self.xyz_probe_stage == 'X': val = float(prb_match.group(1))
+                    elif self.xyz_probe_stage == 'Y': val = float(prb_match.group(2))
+                    else: val = float(prb_match.group(3)) # Fallback for Z-only
+                    self.probe_results.append(val)
+            else: # Legacy single-probe logic
                 self.is_probing = False
                 self.probe_succeeded = True
                 self.update_ui_states()
@@ -827,275 +723,160 @@ class MainWindow(QMainWindow):
                 self.log_to_console(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
 
     def run_probe_cycle(self):
-        self.is_manually_zeroed = False
-        self.z_is_auto_zeroed = False
+        self.is_manually_zeroed = self.z_is_auto_zeroed = False
         arm_dialog = ProbeArmDialog(self)
         arm_dialog.e_stop_button.clicked.connect(self.emergency_stop)
         self.probe_status_changed.connect(arm_dialog.update_probe_status)
         self.send_command("?")
-
         try:
-            result = arm_dialog.exec_()
-            if result != QDialog.Accepted:
-                return
+            if arm_dialog.exec_() != QDialog.Accepted: return
         finally:
             self.probe_status_changed.disconnect(arm_dialog.update_probe_status)
-
         self.dro_timer.stop()
-
-        self.is_probing = True
-        self.is_advanced_probing = True
+        self.is_probing = self.is_advanced_probing = True
         self.probe_phase = 'probing'
         self.probe_succeeded = False
-        self.probe_results = []
-        self.probe_response_count = 0
+        self.probe_results, self.probe_response_count = [], 0
         self.update_ui_states()
-
         try:
             fast_feed = float(self.settings.value("probe/feedrate", "25"))
             slow_feed = float(self.settings.value("probe/slow_feedrate", "10"))
-            retract_dist = float(self.settings.value("probe/retract_dist", "2"))
-            probe_dist = float(self.settings.value("probe/distance", "-25"))
+            retract = float(self.settings.value("probe/retract_dist", "2"))
+            dist = float(self.settings.value("probe/distance", "-25"))
         except (ValueError, TypeError):
-            QMessageBox.critical(self, "Probe Error", "Invalid probe settings. Please check values in the Settings tab.")
-            self.is_probing = False
-            self.is_advanced_probing = False
-            self.update_ui_states()
-            self.dro_timer.start()
+            QMessageBox.critical(self, "Probe Error", "Invalid probe settings.")
+            self.end_probe_cycle()
             return
-
-        self.probe_command_queue = [
-            "G91", f"G38.2 Z{probe_dist} F{fast_feed}", "G90",
-            "G91", f"G0 Z{retract_dist}", "G90",
-            "G91", f"G38.2 Z{probe_dist} F{slow_feed}", "G90",
-            "G91", f"G0 Z{retract_dist}", "G90",
-            "G91", f"G38.2 Z{probe_dist} F{slow_feed}", "G90",
-            "G91", f"G0 Z{retract_dist}", "G90",
-            "G91", f"G38.2 Z{probe_dist} F{slow_feed}", "G90",
-        ]
-
+        self.probe_command_queue = [f"G91",f"G38.2 Z{dist} F{fast_feed}",f"G90",f"G91",f"G0 Z{retract}",f"G90",f"G91",f"G38.2 Z{dist} F{slow_feed}",f"G90",f"G91",f"G0 Z{retract}",f"G90",f"G91",f"G38.2 Z{dist} F{slow_feed}",f"G90",f"G91",f"G0 Z{retract}",f"G90",f"G91",f"G38.2 Z{dist} F{slow_feed}",f"G90"]
         self.send_next_probe_command()
 
     def send_next_probe_command(self):
         if self.probe_command_queue:
-            command = self.probe_command_queue.pop(0)
-            self.log_to_console(f"DEBUG: Sending next probe command: '{command}'. Items left in queue: {len(self.probe_command_queue)}")
-            self.send_command(command)
+            self.send_command(self.probe_command_queue.pop(0))
         else:
-            self.log_to_console(f"DEBUG: Probe command queue empty. Current phase: '{self.probe_phase}'.")
-            if self.probe_phase == 'probing':
-                self.start_probe_finalization()
+            if self.probe_phase == 'probing': self.start_probe_finalization()
             elif self.probe_phase == 'finalizing':
                 if self.xyz_probe_stage in ['X_TRANSITION', 'Y_TRANSITION', 'FINALIZE']:
                     self.handle_probe_transition()
-                else:
-                    self.end_probe_cycle()
+                else: self.end_probe_cycle()
 
     def start_probe_finalization(self):
-        self.log_to_console(f"DEBUG: Starting probe finalization for stage '{self.xyz_probe_stage}'. Collected {len(self.probe_results)} results.")
         if len(self.probe_results) != 3:
-            self.log_to_console(f"ERROR: Advanced probe failed. Expected 3 results, got {len(self.probe_results)}.")
-            self.probe_succeeded = False
+            self.log_to_console(f"ERROR: Probe failed. Expected 3 results, got {len(self.probe_results)}.")
             self.end_probe_cycle()
             return
-
         self.probe_phase = 'finalizing'
         avg_pos = sum(self.probe_results) / len(self.probe_results)
-        
         try:
-            probe_thickness = float(self.settings.value("probe/thickness", 1.0))
-            tool_radius = float(self.settings.value("probe/tool_radius", 3.15))
+            thickness = float(self.settings.value("probe/thickness", 1.0))
+            radius = float(self.settings.value("probe/tool_radius", 3.15))
         except (ValueError, TypeError):
-            QMessageBox.critical(self, "Probe Error", "Invalid Probe Thickness or Tool Radius setting.")
+            QMessageBox.critical(self, "Probe Error", "Invalid probe settings.")
             self.end_probe_cycle()
             return
-
         if not self.xyz_probe_stage or self.xyz_probe_stage == 'Z':
-            final_offset = avg_pos - probe_thickness
-            self.log_to_console(f"DEBUG: Probe finalization successful for stage 'Z'. Average: {avg_pos:.4f}mm.")
-            self.log_to_console(f"INFO: Z-Probe successful. Average: {avg_pos:.4f}mm. Setting Z-Work-Offset.")
-            
-            if not self.xyz_probe_stage: # Standard Z-Probe
-                safe_retract_height = probe_thickness + 10
-                self.probe_command_queue = [f"G10 L2 P1 Z{final_offset:.4f}", f"G90 G0 Z{safe_retract_height}"]
-            else: # 3-Axis Z-Probe
-                self.probe_command_queue = [
-                    f"G10 L2 P1 Z{final_offset:.4f}",
-                    "G91 G0 Z10",
-                    "G91 G0 X-25"
-                ]
+            offset = avg_pos - thickness
+            self.log_to_console(f"INFO: Z-Probe successful. Avg: {avg_pos:.4f}mm. Setting Z-WCO.")
+            if not self.xyz_probe_stage:
+                self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}", f"G90 G0 Z{thickness + 10}"]
+            else:
+                self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}","G91 G0 Z10","G91 G0 X-25"]
                 self.xyz_probe_stage = 'X_TRANSITION'
             self.send_next_probe_command()
-
         elif self.xyz_probe_stage == 'X':
-            final_offset = avg_pos + tool_radius
-            self.log_to_console(f"DEBUG: Probe finalization successful for stage 'X'. Average: {avg_pos:.4f}mm.")
-            self.log_to_console(f"INFO: X-Probe successful. Average: {avg_pos:.4f}mm. Setting X-Work-Offset.")
-            self.probe_command_queue = [
-                f"G10 L2 P1 X{final_offset:.4f}",
-                "G91 G0 X-30",
-                "G91 G0 Y-25"
-            ]
+            offset = avg_pos + radius
+            self.log_to_console(f"INFO: X-Probe successful. Avg: {avg_pos:.4f}mm. Setting X-WCO.")
+            self.probe_command_queue = [f"G10 L2 P1 X{offset:.4f}","G91 G0 X-30","G91 G0 Y-25"]
             self.xyz_probe_stage = 'Y_TRANSITION'
             self.send_next_probe_command()
         elif self.xyz_probe_stage == 'Y':
-            final_offset = avg_pos + tool_radius
-            self.log_to_console(f"DEBUG: Probe finalization successful for stage 'Y'. Average: {avg_pos:.4f}mm.")
-            self.log_to_console(f"INFO: Y-Probe successful. Average: {avg_pos:.4f}mm. Setting Y-Work-Offset.")
-            self.probe_command_queue = [
-                f"G10 L2 P1 Y{final_offset:.4f}"
-            ]
+            offset = avg_pos + radius
+            self.log_to_console(f"INFO: Y-Probe successful. Avg: {avg_pos:.4f}mm. Setting Y-WCO.")
+            self.probe_command_queue = [f"G10 L2 P1 Y{offset:.4f}"]
             self.xyz_probe_stage = 'FINALIZE'
             self.send_next_probe_command()
 
     def handle_probe_transition(self):
         if self.xyz_probe_stage == 'X_TRANSITION':
-            msg = "Probe Z complete. Reposition probe for X-axis probing (to the right of the tool) and press OK."
-            QMessageBox.information(self, "Probe Reposition", msg)
-            self.xyz_probe_stage = 'X'
-            self.execute_probe_stage()
+            QMessageBox.information(self, "Reposition", "Reposition probe for X-axis and press OK.")
+            self.xyz_probe_stage = 'X'; self.execute_probe_stage()
         elif self.xyz_probe_stage == 'Y_TRANSITION':
-            msg = "Probe X complete. Reposition probe for Y-axis probing (in front of the tool) and press OK."
-            QMessageBox.information(self, "Probe Reposition", msg)
-            self.xyz_probe_stage = 'Y'
-            self.execute_probe_stage()
+            QMessageBox.information(self, "Reposition", "Reposition probe for Y-axis and press OK.")
+            self.xyz_probe_stage = 'Y'; self.execute_probe_stage()
         elif self.xyz_probe_stage == 'FINALIZE':
-            self.log_to_console("INFO: 3-Axis Probing Complete. Finalizing...")
-            self.log_to_console("DEBUG: Moving to safe height using machine coordinates (G53).")
-            
-            self.probe_command_queue = [
-                "G53 G0 Z-10.0",
-                "G90 G0 X0 Y0"
-            ]
+            self.log_to_console("INFO: 3-Axis Probing Complete.")
+            self.probe_command_queue = ["G53 G0 Z-10.0", "G90 G0 X0 Y0"]
             self.xyz_probe_stage = 'DONE'
             self.send_next_probe_command()
 
     def end_probe_cycle(self):
-        self.log_to_console(f"DEBUG: Probe cycle ending. Current Stage: {self.xyz_probe_stage}, Phase: {self.probe_phase}.")
         if self.probe_phase == 'finalizing':
-            self.probe_succeeded = True
-            self.z_is_auto_zeroed = True
-
-        self.is_probing = False
-        self.is_advanced_probing = False
-        self.probe_phase = None
-        self.xyz_probe_stage = None
-        self.probe_command_queue = []
-        self.probe_results = []
-        self.probe_response_count = 0
-
+            self.probe_succeeded = self.z_is_auto_zeroed = True
+        self.is_probing = self.is_advanced_probing = False
+        self.probe_phase = self.xyz_probe_stage = None
+        self.probe_command_queue, self.probe_results, self.probe_response_count = [], [], 0
         self.dro_timer.start()
-
         self.update_ui_states()
 
     def run_3axis_probe_cycle(self):
-        self.log_to_console("DEBUG: 3-axis probe cycle initiated.")
-        self.is_manually_zeroed = False
-        self.z_is_auto_zeroed = False
-
+        self.is_manually_zeroed = self.z_is_auto_zeroed = False
         arm_dialog = ProbeArmDialog(self)
         arm_dialog.e_stop_button.clicked.connect(self.emergency_stop)
         self.probe_status_changed.connect(arm_dialog.update_probe_status)
         self.send_command("?")
-
         try:
-            result = arm_dialog.exec_()
-            if result != QDialog.Accepted:
-                return
+            if arm_dialog.exec_() != QDialog.Accepted: return
         finally:
             self.probe_status_changed.disconnect(arm_dialog.update_probe_status)
-
         self.dro_timer.stop()
-        self.is_probing = True
-        self.is_advanced_probing = True
+        self.is_probing = self.is_advanced_probing = True
         self.probe_succeeded = False
-        self.probe_results = []
-        self.probe_response_count = 0
-        
         self.xyz_probe_stage = 'Z'
         self.execute_probe_stage()
         self.update_ui_states()
 
     def execute_probe_stage(self):
-        self.log_to_console(f"DEBUG: Executing probe stage '{self.xyz_probe_stage}'.")
         self.probe_phase = 'probing'
-        self.probe_results = []
-        self.probe_response_count = 0
-
+        self.probe_results, self.probe_response_count = [], 0
         try:
-            fast_feed = float(self.settings.value("probe/feedrate", "25"))
-            slow_feed = float(self.settings.value("probe/slow_feedrate", "10"))
-            retract_dist = float(self.settings.value("probe/retract_dist", "2"))
-            probe_dist = float(self.settings.value("probe/distance", "-25"))
-        except (ValueError, TypeError):
-            QMessageBox.critical(self, "Probe Error", "Invalid probe settings. Please check values in the Settings tab.")
+            fast_feed = float(self.settings.value("probe/feedrate","25"))
+            slow_feed = float(self.settings.value("probe/slow_feedrate","10"))
+            retract = float(self.settings.value("probe/retract_dist","2"))
+            dist = float(self.settings.value("probe/distance","-25"))
+        except (ValueError,TypeError):
+            QMessageBox.critical(self, "Probe Error", "Invalid probe settings.")
             self.end_probe_cycle()
             return
-
         axis = self.xyz_probe_stage
-        
-        if axis == 'Z':
-            p_dist = probe_dist
-            r_dist = retract_dist
-        else:
-            p_dist = abs(probe_dist)
-            r_dist = -retract_dist
-        
-        probe_commands = [
-            f"G91 G38.2 {axis}{p_dist} F{fast_feed}",
-            f"G91 G0 {axis}{r_dist}",
-            f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
-            f"G91 G0 {axis}{r_dist}",
-            f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
-            f"G91 G0 {axis}{r_dist}",
-            f"G91 G38.2 {axis}{p_dist} F{slow_feed}",
-            f"G91 G0 {axis}{r_dist}", # Final retraction to solve race condition
-        ]
-
-        if axis == 'Y':
-            self.probe_command_queue = ["G91 G0 X45"] + probe_commands
-        else:
-            self.probe_command_queue = probe_commands
-        
-        self.log_to_console(f"DEBUG: Queued {len(self.probe_command_queue)} commands for stage '{self.xyz_probe_stage}': {self.probe_command_queue}")
+        p_dist = dist if axis == 'Z' else abs(dist)
+        r_dist = retract if axis == 'Z' else -retract
+        probe_commands=[f"G91 G38.2 {axis}{p_dist} F{fast_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}"]
+        self.probe_command_queue = ["G91 G0 X45"] + probe_commands if axis == 'Y' else probe_commands
         self.send_next_probe_command()
 
     def run_homing_cycle(self):
-        self.is_homed = False
-        self.probe_succeeded = False
-        self.is_manually_zeroed = False
-        self.z_is_auto_zeroed = False
+        self.is_homed=self.probe_succeeded=self.is_manually_zeroed=self.z_is_auto_zeroed=False
         self.home_pulse_timer.start()
         self.send_command("$H")
 
     def set_location(self):
-        locations = [f"Work Origin G{54+i} (P{i+1})" for i in range(6)] + ["Safe Position (G28.1)"]
-        prompt = "Select which location you would like to set:"
-        choice_index = LocationDialog.get_selected_index(self, "Set Location", locations, prompt)
-
-        if choice_index == -1:
-            return
-
-        if choice_index < 6:
-            p_number = choice_index + 1
-            command = f"G10 L2 P{p_number} X{self.mpos_x} Y{self.mpos_y} Z{self.mpos_z}"
-            self.send_command(command)
-            self.log_to_console(f"INFO: Set work origin for G{53 + p_number} (P{p_number}).")
+        locations = [f"Work Origin G{54+i} (P{i+1})" for i in range(6)]+["Safe Position (G28.1)"]
+        choice = LocationDialog.get_selected_index(self, "Set Location", locations, "Select location to set:")
+        if choice == -1: return
+        if choice < 6:
+            p = choice + 1
+            self.send_command(f"G10 L2 P{p} X{self.mpos_x} Y{self.mpos_y} Z{self.mpos_z}")
+            self.log_to_console(f"INFO: Set WCS for G{53+p} (P{p}).")
         else:
             self.send_command("G28.1")
-            self.log_to_console("INFO: Current position saved as safe position (G28).")
+            self.log_to_console("INFO: Position saved as G28.")
 
     def go_to_location(self):
         locations = [f"Work Origin G{54+i}" for i in range(6)] + ["Safe Position (G28)"]
-        prompt = "Select which location you would like to go to:"
-        choice_index = LocationDialog.get_selected_index(self, "Go To Location", locations, prompt)
-
-        if choice_index == -1:
-            return
-
-        if choice_index < 6:
-            wcs_command = f"G{54+choice_index}"
-            self.send_command(wcs_command)
+        choice = LocationDialog.get_selected_index(self, "Go To", locations, "Select destination:")
+        if choice == -1: return
+        if choice < 6:
+            self.send_command(f"G{54+choice}")
             self.send_command("G90 G0 X0 Y0")
         else:
             self.send_command("G28")
@@ -1109,6 +890,20 @@ class MainWindow(QMainWindow):
             self.gcode_progress.setMaximum(len(self.gcode_lines))
             self.gcode_current_line = 0
             self.gcode_progress.setValue(0)
+            self.gcode_estimated_time = self.estimate_gcode_time()
+            if self.gcode_estimated_time > 0:
+                mins, secs = divmod(self.gcode_estimated_time, 60)
+                time_str = f"{int(mins)}m {int(secs)}s"
+                self.gcode_progress.setFormat(f"0.0% | Est. {time_str} remaining")
+                self.log_to_console(f"DEBUG: Initial time estimated: {time_str}")
+            else:
+                self.gcode_progress.setFormat("0.0%")
+            self.gcode_table.setRowCount(len(self.gcode_lines))
+            for i, line in enumerate(self.gcode_lines):
+                self.gcode_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                self.gcode_table.setItem(i, 1, QTableWidgetItem(line))
+                self.gcode_table.setItem(i, 2, QTableWidgetItem("Queued"))
+            self.gcode_table.resizeColumnsToContents()
             self.update_ui_states()
 
     def update_ui_states(self):
@@ -1117,77 +912,39 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
         self.pause_button.setEnabled(is_connected and self.gcode_is_running)
         self.stop_button.setEnabled(is_connected and self.gcode_is_running)
-        for button in [self.home_button, self.unlock_button, self.run_probe_button, self.run_3axis_probe_button, self.set_location_button, self.go_to_location_button, self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input]:
-            button.setEnabled(is_connected)
+        for w in [self.home_button,self.unlock_button,self.run_probe_button,self.run_3axis_probe_button,self.set_location_button,self.go_to_location_button,self.e_stop_button,self.spindle_on_button,self.spindle_off_button,self.spindle_speed_input]: w.setEnabled(is_connected)
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
-
-        self.home_pulse_timer.stop()
-        self.alarm_pulse_timer.stop()
-        self.home_button.setStyleSheet("")
-        self.unlock_button.setStyleSheet("")
-        self.run_probe_button.setStyleSheet("")
-
-
-        if not is_connected:
-            self.is_homed = False
-            self.is_manually_zeroed = False
-
-        if self.machine_state == "Home":
-            self.home_pulse_timer.start()
-        else:
-            if self.is_homed:
-                self.home_button.setText("Homed")
-                self.home_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
-            else:
-                self.home_button.setText("Home ($H)")
-
+        self.home_pulse_timer.stop(); self.alarm_pulse_timer.stop()
+        self.home_button.setStyleSheet(""); self.unlock_button.setStyleSheet(""); self.run_probe_button.setStyleSheet("")
+        if not is_connected: self.is_homed = self.is_manually_zeroed = False
+        if self.machine_state == "Home": self.home_pulse_timer.start()
+        else: self.home_button.setText("Homed" if self.is_homed else "Home ($H)")
+        if self.is_homed: self.home_button.setStyleSheet("background-color:darkgreen;color:white;font-weight:bold;")
         if self.machine_state == "Alarm":
             self.alarm_pulse_timer.start()
-            if self.current_alarm_code in self.alarm_codes:
-                alarm_message = self.alarm_codes[self.current_alarm_code]
-                self.unlock_button.setText(f"ALARM: {alarm_message}")
-            else:
-                self.unlock_button.setText("UNLOCK")
+            self.unlock_button.setText(f"ALARM: {self.alarm_codes.get(self.current_alarm_code, 'UNLOCK')}")
             self.is_homed = False
         else:
-            if is_connected:
-                self.unlock_button.setText("No Alarm")
-                self.unlock_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
-            else:
-                self.unlock_button.setText("Unlock ($X)")
-
-        if self.machine_state == "Alarm":
-            self.run_probe_button.setEnabled(False)
-            self.run_probe_button.setText("Unlock to Probe")
-            self.run_3axis_probe_button.setEnabled(False)
-            self.run_3axis_probe_button.setText("Unlock to Probe")
-        elif self.is_probing:
-            self.run_probe_button.setEnabled(False)
-            self.run_3axis_probe_button.setEnabled(False)
-            if self.xyz_probe_stage:
-                self.run_probe_button.setText("Probing...")
-                self.run_3axis_probe_button.setText(f"Probing {self.xyz_probe_stage}...")
-            else:
-                self.run_probe_button.setText("Probing...")
-                self.run_3axis_probe_button.setText("Probing...")
+            self.unlock_button.setText("Unlock ($X)" if not is_connected else "No Alarm")
+            if is_connected: self.unlock_button.setStyleSheet("background-color:darkgreen;color:white;font-weight:bold;")
+        probe_enabled = is_connected and not self.is_probing and self.machine_state != "Alarm"
+        self.run_probe_button.setEnabled(probe_enabled)
+        self.run_3axis_probe_button.setEnabled(probe_enabled)
+        if self.is_probing:
+            text = f"Probing {self.xyz_probe_stage}..." if self.xyz_probe_stage else "Probing..."
+            self.run_probe_button.setText(text); self.run_3axis_probe_button.setText(text)
         elif self.z_is_auto_zeroed:
-            self.run_probe_button.setText("Z Zeroed")
-            self.run_probe_button.setStyleSheet("background-color: darkgreen; color: white; font-weight: bold;")
-            self.run_probe_button.setEnabled(is_connected)
-            self.run_3axis_probe_button.setEnabled(is_connected)
-            self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
+            self.run_probe_button.setText("Z Zeroed"); self.run_probe_button.setStyleSheet("background-color:darkgreen;color:white;font-weight:bold;"); self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
         else:
-            self.run_probe_button.setText("Auto Zero Z")
-            self.run_probe_button.setEnabled(is_connected)
-            self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
-            self.run_3axis_probe_button.setEnabled(is_connected)
-
+            self.run_probe_button.setText("Auto Zero Z"); self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
 
     def start_gcode(self):
         if self.gcode_lines:
-            self.probe_succeeded = False
-            self.is_manually_zeroed = False
+            for i in range(self.gcode_table.rowCount()):
+                item = QTableWidgetItem("Queued"); self.gcode_table.setItem(i, 2, item); self.gcode_table.item(i, 2).setBackground(QColor("white"))
+            self.probe_succeeded = self.is_manually_zeroed = False
             self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = True, False, 0
+            self.gcode_start_time = time.time()
             self.update_ui_states()
             self.send_next_gcode_line()
 
@@ -1199,201 +956,165 @@ class MainWindow(QMainWindow):
 
     def emergency_stop(self):
         self.send_command("\x18")
-        self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = False, False, 0
-        self.gcode_progress.setValue(0)
+        self.gcode_is_running=self.gcode_is_paused=self.gcode_current_line=0
+        self.gcode_progress.setValue(0); self.gcode_progress.setFormat("%p%")
         self.update_ui_states()
 
     def spindle_on(self):
         try: self.send_command(f"M3 S{int(self.spindle_speed_input.text())}")
         except ValueError: self.log_to_console("INFO: Invalid spindle speed.")
 
-    def stop_gcode(self):
-        self.emergency_stop()
+    def stop_gcode(self): self.emergency_stop()
+
+    def estimate_gcode_time(self):
+        try:
+            max_x=float(self.grbl_setting_widgets["$110"].text()); max_y=float(self.grbl_setting_widgets["$111"].text()); max_z=float(self.grbl_setting_widgets["$112"].text()); src="GRBL"
+        except (KeyError, ValueError):
+            max_x,max_y,max_z=5000,5000,1000; src="Defaults"
+        self.log_to_console(f"DEBUG: Estimating time with Max Rates (X,Y,Z): {max_x}, {max_y}, {max_z} from {src}")
+        x,y,z,feed,total_time=0,0,0,1000,0; is_abs=True; self.gcode_line_times=[]
+        for line in self.gcode_lines:
+            line_time = 0; cmd = line.upper().split(';')[0]
+            if "G90" in cmd: is_abs=True
+            if "G91" in cmd: is_abs=False
+            if cmd.startswith(("G0","G1")):
+                tx,ty,tz=x,y,z
+                if "X" in cmd: tx=float(re.search(r'X([-\d.]+)',cmd).group(1)) if is_abs else x+float(re.search(r'X([-\d.]+)',cmd).group(1))
+                if "Y" in cmd: ty=float(re.search(r'Y([-\d.]+)',cmd).group(1)) if is_abs else y+float(re.search(r'Y([-\d.]+)',cmd).group(1))
+                if "Z" in cmd: tz=float(re.search(r'Z([-\d.]+)',cmd).group(1)) if is_abs else z+float(re.search(r'Z([-\d.]+)',cmd).group(1))
+                if "F" in cmd: feed=float(re.search(r'F([-\d.]+)',cmd).group(1))
+                dist=math.sqrt((tx-x)**2+(ty-y)**2+(tz-z)**2)
+                if dist > 0:
+                    if cmd.startswith("G0"):
+                        line_time = max(abs(tx-x)/max_x if max_x>0 else 0, abs(ty-y)/max_y if max_y>0 else 0, abs(tz-z)/max_z if max_z>0 else 0) * 60
+                    else: line_time = dist/(feed/60)
+                x,y,z = tx,ty,tz
+            total_time+=line_time; self.gcode_line_times.append(line_time)
+        return total_time
+
+    def update_progress_display(self):
+        if not self.gcode_is_running or not self.gcode_line_times or self.gcode_estimated_time==0: return
+        executed = min(self.gcode_current_line, len(self.gcode_line_times))
+        self.gcode_progress.setValue(executed)
+        time_done = sum(self.gcode_line_times[:executed])
+        time_left = self.gcode_estimated_time - time_done
+        if time_left < 0: time_left = 0
+        percent = (time_done / self.gcode_estimated_time) * 100
+        mins, secs = divmod(time_left, 60)
+        time_str = f"{int(mins)}m {int(secs)}s"
+        self.gcode_progress.setFormat(f"{percent:.1f}% | Est. {time_str} remaining")
+        self.log_to_console(f"DEBUG: Time Calc: {time_done:.1f}s done / {self.gcode_estimated_time:.1f}s total -> {time_left:.1f}s left")
 
     def send_next_gcode_line(self):
         if self.gcode_is_running and not self.gcode_is_paused:
             if self.gcode_current_line < len(self.gcode_lines):
-                self.send_command(self.gcode_lines[self.gcode_current_line])
-                self.gcode_progress.setValue(self.gcode_current_line + 1)
+                cmd = self.gcode_lines[self.gcode_current_line]
+                self.log_to_console(f"DEBUG: Sending L:{self.gcode_current_line + 1}/{len(self.gcode_lines)} -> {cmd}")
+                item = QTableWidgetItem("Sent"); self.gcode_table.setItem(self.gcode_current_line, 2, item); self.gcode_table.item(self.gcode_current_line, 2).setBackground(QColor("yellow")); self.gcode_table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+                self.send_command(cmd)
                 self.gcode_current_line += 1
             else:
-                self.gcode_is_running = False
-                self.update_ui_states()
-                self.log_to_console("INFO: G-code sending finished.")
+                self.gcode_is_running=False; self.gcode_start_time=None; self.update_ui_states(); self.log_to_console("INFO: G-code finished."); self.gcode_progress.setFormat("Complete!")
 
     def send_command(self, command):
-        if self.serial_connection and self.serial_connection.is_open:
-            self.log_to_console(f"TX: {command}")
-            self.serial_connection.write((command + '\n').encode('utf-8'))
+        if isinstance(self.serial_worker, MockSerialWorker):
+            self.log_to_console(f"TX (Mock): {command}"); self.serial_worker.send_command(command)
+        elif self.serial_connection and self.serial_connection.is_open:
+            self.log_to_console(f"TX: {command}"); self.serial_connection.write((command + '\n').encode('utf-8'))
         else:
-            self.log_to_console(f"INFO: Not connected. Command '{command}' not sent.")
+            self.log_to_console(f"INFO: Not connected. Cmd '{command}' not sent.")
 
     def send_console_command(self):
-        command = self.command_input.text()
-        if command:
-            self.send_command(command)
-            self.command_input.clear()
+        cmd = self.command_input.text()
+        if cmd: self.send_command(cmd); self.command_input.clear()
 
     def send_jog_command(self, axis, direction, button):
-        self.last_jog_button = button
-        self.is_manually_zeroed = False
+        self.last_jog_button = button; self.is_manually_zeroed = False
         step = float(self.step_size_combo.currentText())
         self.send_command(f"$J=G91 G21 {axis}{step * direction} F1000")
 
-    def populate_ports(self):
-        self.port_combobox.clear()
-        self.port_combobox.addItems([port.device for port in serial.tools.list_ports.comports()])
-
+    def populate_ports(self): self.port_combobox.clear(); self.port_combobox.addItems([p.device for p in serial.tools.list_ports.comports()])
     def toggle_connection(self):
         if self.serial_connection and self.serial_connection.is_open: self.disconnect_serial()
         else: self.connect_serial()
 
     def connect_serial(self):
+        if self.mock_grbl_checkbox.isChecked():
+            self.serial_worker=MockSerialWorker(self); self.serial_worker.serial_data_received.connect(self.handle_serial_data); self.dro_timer.start(); self.connect_button.setText("Disconnect"); self.update_connection_indicator(True,is_mock=True); self.log_to_console("INFO: Connected in Mock Mode."); self.update_ui_states(); return
         port, baud = self.port_combobox.currentText(), int(self.baud_combobox.currentText())
         if not port: return
         try:
-            self.serial_connection = serial.Serial(port, baud, timeout=1)
-            time.sleep(2)
-            self.serial_connection.write(b"\r\n\r\n")
-            self.serial_connection.flushInput()
-            self.serial_thread = QThread()
-            self.serial_worker = SerialWorker(self.serial_connection)
-            self.serial_worker.moveToThread(self.serial_thread)
-            self.serial_thread.started.connect(self.serial_worker.run)
-            self.serial_worker.serial_data_received.connect(self.handle_serial_data)
-            self.serial_thread.start()
-            self.dro_timer.start()
-            self.connect_button.setText("Disconnect")
-            self.update_connection_indicator(True)
+            self.serial_connection=serial.Serial(port,baud,timeout=1); time.sleep(2); self.serial_connection.write(b"\r\n\r\n"); self.serial_connection.flushInput(); self.serial_thread=QThread(); self.serial_worker=SerialWorker(self.serial_connection); self.serial_worker.moveToThread(self.serial_thread); self.serial_thread.started.connect(self.serial_worker.run); self.serial_worker.serial_data_received.connect(self.handle_serial_data); self.serial_thread.start(); self.dro_timer.start(); self.connect_button.setText("Disconnect"); self.update_connection_indicator(True)
         except (serial.SerialException, FileNotFoundError) as e:
-            self.log_to_console(f"ERROR: Failed to connect - {e}")
-            self.update_connection_indicator(False)
+            self.log_to_console(f"ERROR: Failed to connect - {e}"); self.update_connection_indicator(False)
         self.update_ui_states()
 
     def disconnect_serial(self):
         self.dro_timer.stop()
-        if self.serial_thread: self.serial_worker.stop(); self.serial_thread.quit(); self.serial_thread.wait()
+        if isinstance(self.serial_worker, MockSerialWorker):
+            self.serial_worker.stop(); self.log_to_console("INFO: Disconnected from Mock Mode.")
+        elif self.serial_thread:
+            self.serial_worker.stop(); self.serial_thread.quit(); self.serial_thread.wait()
         if self.serial_connection: self.serial_connection.close()
-        self.connect_button.setText("Connect")
-        self.serial_connection = self.serial_thread = self.serial_worker = None
-        self.update_connection_indicator(False)
-        self.update_ui_states()
+        self.connect_button.setText("Connect"); self.serial_connection=self.serial_thread=self.serial_worker=None; self.update_connection_indicator(False); self.update_ui_states()
 
     def pulse_home_button(self):
-        self.home_button.setText("Homing")
-        self.home_pulse_state = 1 - self.home_pulse_state
-        self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state == 0 else '#8BC34A'}; color: white;")
+        self.home_button.setText("Homing"); self.home_pulse_state = 1-self.home_pulse_state; self.home_button.setStyleSheet(f"background-color: {'#4CAF50' if self.home_pulse_state==0 else '#8BC34A'}; color: white;")
 
     def pulse_alarm_button(self):
-        if self.current_alarm_code in self.alarm_codes:
-            alarm_message = self.alarm_codes[self.current_alarm_code]
-            base_text = f"ALARM: {alarm_message}"
-        else:
-            base_text = "UNLOCK"
-        self.unlock_button.setText(base_text)
-        self.alarm_pulse_state = 1 - self.alarm_pulse_state
-        self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state == 0 else '#FF7043'}; color: white; font-weight: bold;")
+        self.unlock_button.setText(f"ALARM: {self.alarm_codes.get(self.current_alarm_code, 'UNLOCK')}"); self.alarm_pulse_state=1-self.alarm_pulse_state; self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state==0 else '#FF7043'}; color: white; font-weight: bold;")
 
-    def update_connection_indicator(self, is_connected):
-        self.connection_status_indicator.setText("Connected" if is_connected else "Disconnected")
-        self.connection_status_indicator.setStyleSheet(f"background-color: {'green' if is_connected else 'red'}; color: white; font-weight: bold;")
+    def update_connection_indicator(self, is_connected, is_mock=False):
+        if is_connected:
+            if is_mock: self.connection_status_indicator.setText("Connected (Mock)"); self.connection_status_indicator.setStyleSheet("background-color:#FFC107;color:black;font-weight:bold;")
+            else: self.connection_status_indicator.setText("Connected"); self.connection_status_indicator.setStyleSheet("background-color:green;color:white;font-weight:bold;")
+        else:
+            self.connection_status_indicator.setText("Disconnected"); self.connection_status_indicator.setStyleSheet("background-color:red;color:white;font-weight:bold;")
 
     def load_settings(self):
-        defaults = {
-            "probe/distance": "-25",
-            "probe/feedrate": "25",
-            "probe/thickness": "1.0",
-            "probe/slow_feedrate": "10",
-            "probe/retract_dist": "2",
-            "probe/tool_radius": "3.15"
-        }
-        for key, widget in self.get_settings_widgets().items():
-            widget.setText(self.settings.value(key, defaults.get(key)))
+        defaults={"probe/distance":"-25","probe/feedrate":"25","probe/thickness":"1.0","probe/slow_feedrate":"10","probe/retract_dist":"2","probe/tool_radius":"3.15"}
+        for key,widget in self.get_settings_widgets().items(): widget.setText(self.settings.value(key, defaults.get(key)))
 
     def save_settings(self):
-        for key, widget in self.get_settings_widgets().items():
-            self.settings.setValue(key, widget.text())
-        for setting, field in self.get_grbl_fields().items():
-            if field.text() != self.initial_grbl_settings.get(setting, ''):
-                self.send_command(f"{setting}={field.text()}")
+        for key,widget in self.get_settings_widgets().items(): self.settings.setValue(key, widget.text())
+        for setting,field in self.get_grbl_fields().items():
+            if field.text() != self.initial_grbl_settings.get(setting,''): self.send_command(f"{setting}={field.text()}")
         self.log_to_console("INFO: Settings saved.")
 
     def update_grbl_setting(self, setting, value):
-        self.initial_grbl_settings[setting] = value
-        if setting in self.grbl_setting_widgets:
-            self.grbl_setting_widgets[setting].setText(value)
+        self.initial_grbl_settings[setting]=value
+        if setting in self.grbl_setting_widgets: self.grbl_setting_widgets[setting].setText(value)
         else:
-            setting_info = self.GRBL_SETTINGS_INFO.get(setting)
-            if not setting_info:
-                label_text = f"{setting}:"
-                tooltip_text = "No description available."
-            else:
-                label_text = f"{setting_info['label']}:"
-                tooltip_text = setting_info['tooltip']
+            info=self.GRBL_SETTINGS_INFO.get(setting,{}); lbl_txt=f"{info.get('label',setting)}:"; tip_txt=info.get('tooltip',"No description.")
+            label=QLabel(lbl_txt); field=QLineEdit(value); field.setToolTip(tip_txt); field.installEventFilter(self)
+            row=(self.grbl_settings_count//2)+1; col=self.grbl_settings_count%2
+            self.grbl_layout.addWidget(label,row,col*2); self.grbl_layout.addWidget(field,row,col*2+1); self.grbl_setting_widgets[setting]=field; self.numpad_enabled_fields.append(field); self.grbl_settings_count+=1
 
-            label = QLabel(label_text)
-            field = QLineEdit(value)
-            field.setToolTip(tooltip_text)
-            field.installEventFilter(self)
-
-            row = (self.grbl_settings_count // 2) + 1
-            col = self.grbl_settings_count % 2
-            self.grbl_layout.addWidget(label, row, col * 2)
-            self.grbl_layout.addWidget(field, row, col * 2 + 1)
-            self.grbl_setting_widgets[setting] = field
-            self.numpad_enabled_fields.append(field)
-            self.grbl_settings_count += 1
-
-    def get_settings_widgets(self):
-        return {
-            "probe/distance": self.probe_dist_input,
-            "probe/feedrate": self.probe_feed_input,
-            "probe/thickness": self.probe_thickness_input,
-            "probe/slow_feedrate": self.slow_probe_feed_input,
-            "probe/retract_dist": self.probe_retract_input,
-            "probe/tool_radius": self.tool_radius_input
-        }
-
-    def get_grbl_fields(self):
-        return self.grbl_setting_widgets
+    def get_settings_widgets(self): return {"probe/distance":self.probe_dist_input,"probe/feedrate":self.probe_feed_input,"probe/thickness":self.probe_thickness_input,"probe/slow_feedrate":self.slow_probe_feed_input,"probe/retract_dist":self.probe_retract_input,"probe/tool_radius":self.tool_radius_input}
+    def get_grbl_fields(self): return self.grbl_setting_widgets
 
     def show_number_pad(self, line_edit):
         dialog = NumberPadDialog(line_edit.text(), self)
-        if dialog.exec_() == QDialog.Accepted:
-            new_value = dialog.get_value()
-            line_edit.setText(new_value)
+        if dialog.exec_() == QDialog.Accepted: line_edit.setText(dialog.get_value())
         line_edit.clearFocus()
 
     def flash_jog_button(self, button):
-        original_text = button.text()
-        original_stylesheet = button.styleSheet()
-        button.setText("Soft Limit")
-        button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-        QTimer.singleShot(2000, lambda: self.restore_jog_button(button, original_text, original_stylesheet))
+        orig_txt,orig_style = button.text(),button.styleSheet()
+        button.setText("Soft Limit"); button.setStyleSheet("background-color:red;color:white;font-weight:bold;")
+        QTimer.singleShot(2000, lambda: self.restore_jog_button(button, orig_txt, orig_style))
 
-    def restore_jog_button(self, button, text, stylesheet):
-        button.setText(text)
-        button.setStyleSheet(stylesheet)
-
+    def restore_jog_button(self, button, text, stylesheet): button.setText(text); button.setStyleSheet(stylesheet)
     def shutdown_pi(self):
-        if QMessageBox.question(self, 'Confirm Shutdown', "Are you sure?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
-            os.system("sudo shutdown -h now")
+        if QMessageBox.question(self, 'Confirm Shutdown', "Are you sure?", QMessageBox.Yes|QMessageBox.No, QMessageBox.No)==QMessageBox.Yes: os.system("sudo shutdown -h now")
 
     def closeEvent(self, event):
-        print("DEBUG: closeEvent triggered. Stopping camera and disconnecting serial.")
-        self.stop_camera()
-        self.disconnect_serial()
-        super().closeEvent(event)
+        self.stop_camera(); self.disconnect_serial(); super().closeEvent(event)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.FocusIn:
-            if isinstance(obj, QLineEdit) and obj in self.numpad_enabled_fields:
-                obj.setReadOnly(True)
-                self.show_number_pad(obj)
-                return True
-        elif event.type() == QEvent.FocusOut:
-            if isinstance(obj, QLineEdit) and obj in self.numpad_enabled_fields:
-                obj.setReadOnly(False)
+        if event.type() == QEvent.FocusIn and isinstance(obj,QLineEdit) and obj in self.numpad_enabled_fields:
+            obj.setReadOnly(True); self.show_number_pad(obj); return True
+        elif event.type() == QEvent.FocusOut and isinstance(obj,QLineEdit) and obj in self.numpad_enabled_fields:
+            obj.setReadOnly(False)
         return super().eventFilter(obj, event)
 
 if __name__ == "__main__":
