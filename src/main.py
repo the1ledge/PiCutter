@@ -1,19 +1,130 @@
-# v0.16.6
+# v0.16.7 
 import sys
+import os
+
+# Minimal Qt imports to create an early splash immediately
+from PySide2.QtCore import Qt, QTimer
+from PySide2.QtWidgets import QApplication, QSplashScreen
+from PySide2.QtGui import QPixmap, QPainter, QColor, QFont
+
+# Create QApplication early so the splash can appear before heavier imports
+app = QApplication(sys.argv)
+app.setStyle("Fusion")
+
+# Prepare paths and an initial lightweight base pixmap to reveal.
+logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+# splash_base_pix is the pixmap that will be progressively revealed by the carving animation.
+# Start with a compact generated base so the splash shows immediately; defer loading the real logo.
+splash_base_pix = QPixmap(320, 200)
+splash_base_pix.fill(QColor('#2E3440'))
+_tmp_p = QPainter(splash_base_pix)
+_font = QFont()
+_font.setPointSize(16)
+_font.setBold(True)
+_tmp_p.setFont(_font)
+_tmp_p.setPen(QColor('white'))
+_tmp_p.drawText(splash_base_pix.rect(), Qt.AlignCenter, "PiGRBL CNC Controller\nLoading...")
+_tmp_p.end()
+
+# Defer heavy logo load/scale to a short single-shot timer so the splash shows immediately
+def _load_real_logo():
+    global splash_base_pix
+    try:
+        if os.path.exists(logo_path):
+            pm = QPixmap(logo_path)
+            if not pm.isNull():
+                splash_base_pix = pm.scaled(320, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    except Exception:
+        # ignore and keep fallback
+        pass
+
+
+# Use the prepared base pixmap for the initial splash instance
+splash = QSplashScreen(splash_base_pix, Qt.WindowStaysOnTopHint)
+# Initially show the pixmap fully covered so the carving animation reveals it
+_initial_pm = QPixmap(splash_base_pix)
+init_painter = QPainter(_initial_pm)
+init_painter.fillRect(0, 0, _initial_pm.width(), _initial_pm.height(), QColor('white'))
+init_painter.end()
+splash.setPixmap(_initial_pm)
+splash.showMessage("Starting... 0%", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
+splash.show()
+app.processEvents()
+
+# Carving animation state for the splash: reveal the logo from top->bottom
+_splash_carve_progress = 0.0  # 0.0 = fully covered, 1.0 = fully revealed
+_splash_carve_timer = QTimer()
+_splash_reveal_done = False
+_splash_finish_pending = None
+
+def _request_finish_after_reveal(window):
+    """Request that the splash be finished and the main window shown.
+    If the 100% reveal wait has already completed, finish immediately. Otherwise queue the
+    window and it will be shown after the reveal wait timer fires.
+    """
+    global _splash_reveal_done, _splash_finish_pending
+    if _splash_reveal_done:
+        splash.finish(window)
+        window.show()
+    else:
+        # store the pending window; when the reveal wait completes it will be shown
+        _splash_finish_pending = window
+
+def _splash_carve_step():
+    """Advance the carving progress and repaint the splash.
+    Draw a white rectangle covering the remaining (1-progress) top portion of the pixmap.
+    """
+    global _splash_carve_progress
+    # advance progress smoothly
+    _splash_carve_progress = min(1.0, _splash_carve_progress + 0.02)
+    # create an overlayed pixmap to draw the cover
+    base = splash_base_pix
+    pm = QPixmap(base)
+    painter = QPainter(pm)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+    cover_height = int(pm.height() * (1.0 - _splash_carve_progress))
+    if cover_height > 0:
+        painter.fillRect(0, 0, pm.width(), cover_height, QColor('white'))
+    painter.end()
+    splash.setPixmap(pm)
+    # make sure any messages are still visible
+    splash.showMessage(f"Starting... {int(_splash_carve_progress*100)}%", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
+    app.processEvents()
+    if _splash_carve_progress >= 1.0:
+        _splash_carve_timer.stop()
+        # start a 1 second wait at 100% so the user can see the fully revealed logo
+        def _reveal_done():
+            global _splash_reveal_done, _splash_finish_pending
+            _splash_reveal_done = True
+            if _splash_finish_pending:
+                try:
+                    splash.finish(_splash_finish_pending)
+                    _splash_finish_pending.show()
+                finally:
+                    _splash_finish_pending = None
+
+        QTimer.singleShot(1000, _reveal_done)
+
+# Start the carving timer with a short interval to show progress while startup work runs
+_splash_carve_timer.setInterval(40)
+_splash_carve_timer.timeout.connect(_splash_carve_step)
+_splash_carve_timer.start()
+
+# Schedule loading the real logo shortly after the splash so it doesn't delay initial display
+QTimer.singleShot(80, _load_real_logo)
+
+# Now import heavier modules and the rest of the PySide2 widgets
 import serial.tools.list_ports
 import re
 import time
-import os
 import cv2
-import math 
+import math
 import numpy as np
 from PySide2.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSplashScreen
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSizePolicy
 )
-from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings, QEvent, Slot
-from PySide2.QtGui import QTextCursor, QImage, QPixmap, QColor, QPainter, QFont
-
-from picamera2 import Picamera2
+from PySide2.QtCore import QThread, QObject, Signal, QSettings, QEvent, Slot
+from PySide2.QtGui import QTextCursor, QImage
 
 class CameraWorker(QThread):
     frame_ready = Signal(QImage)
@@ -26,6 +137,7 @@ class CameraWorker(QThread):
 
     def run(self):
         try:
+            from picamera2 import Picamera2
             self.picam2 = Picamera2()
             config = self.picam2.create_preview_configuration(main={"format": "RGB888"})
             self.picam2.configure(config)
@@ -391,6 +503,9 @@ class MainWindow(QMainWindow):
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet("border: 1px solid black; background-color: #333; color: white;")
         self.video_label.setMinimumSize(320, 240)
+        self.video_label.setMaximumSize(640, 480)
+        self.video_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.video_label.setScaledContents(False)
         video_layout.addWidget(self.video_label)
         video_group.setLayout(video_layout)
         left_column_layout.addWidget(video_group)
@@ -505,10 +620,16 @@ class MainWindow(QMainWindow):
         self.gcode_video_label = QLabel("Initializing Camera...")
         self.gcode_video_label.setAlignment(Qt.AlignCenter)
         self.gcode_video_label.setStyleSheet("border: 1px solid black; background-color: #333; color: white;")
+        # Use a fixed size for the G-Code tab video to prevent uncontrolled expansion on small screens
+        self.gcode_video_label.setScaledContents(False)
+        self.gcode_video_label.setFixedSize(320, 240)
         video_layout.addWidget(self.gcode_video_label)
         video_group.setLayout(video_layout)
-        main_gcode_layout.addLayout(left_panel_layout, 1)
-        main_gcode_layout.addWidget(video_group, 1)
+        # Keep the video group narrow and give most horizontal space to the left panel
+        video_group.setFixedWidth(340)
+        video_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        main_gcode_layout.addLayout(left_panel_layout, 3)
+        main_gcode_layout.addWidget(video_group, 0)
 
     def build_console_tab(self):
         console_tab = QWidget()
@@ -618,13 +739,72 @@ class MainWindow(QMainWindow):
         self.send_button.clicked.connect(self.send_console_command)
         self.command_input.returnPressed.connect(self.send_console_command)
 
+    def run_auto_connect_with_splash(self, splash, timeout_ms=3000):
+        """Attempt an automatic connection while the provided splash is visible.
+        If a connection is established before timeout_ms, show the UI immediately.
+        Otherwise, show the UI after timeout_ms and allow manual connect.
+        """
+        splash.showMessage("Attempting auto-connect...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+        QApplication.processEvents()
+
+        def finish_no_conn():
+            splash.showMessage("Auto-connect timed out. Starting UI...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            QApplication.processEvents()
+            QTimer.singleShot(200, lambda: _request_finish_after_reveal(self))
+
+        def attempt_connect():
+            try:
+                # Refresh port list first
+                self.populate_ports()
+                splash.showMessage("Scanning serial ports...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+                QApplication.processEvents()
+
+                connected = False
+                # Prefer real serial ports if available
+                if self.port_combobox.count() > 0:
+                    # choose the first available port
+                    self.port_combobox.setCurrentIndex(0)
+                    self.connect_serial()
+                    connected = bool(self.serial_connection and getattr(self.serial_connection, 'is_open', False)) or isinstance(self.serial_worker, MockSerialWorker)
+                else:
+                    # No ports found; if mock option exists, try mock connect
+                    if hasattr(self, 'mock_grbl_checkbox') and self.mock_grbl_checkbox.isEnabled():
+                        self.mock_grbl_checkbox.setChecked(True)
+                        self.connect_serial()
+                        connected = isinstance(self.serial_worker, MockSerialWorker)
+
+                if connected:
+                    splash.showMessage("Auto-connect succeeded.", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+                    QApplication.processEvents()
+                    # show UI shortly after success (respect reveal hold)
+                    QTimer.singleShot(200, lambda: _request_finish_after_reveal(self))
+                    if hasattr(self, '_splash_timeout_timer') and self._splash_timeout_timer.isActive():
+                        self._splash_timeout_timer.stop()
+            except Exception:
+                # any error -> let timeout handle it
+                pass
+
+        # Start the attempt shortly after to ensure splash paints
+        QTimer.singleShot(50, attempt_connect)
+        # Start timeout fallback
+        self._splash_timeout_timer = QTimer(self)
+        self._splash_timeout_timer.setSingleShot(True)
+        self._splash_timeout_timer.timeout.connect(finish_no_conn)
+        self._splash_timeout_timer.start(timeout_ms)
+
     @Slot(QImage)
     def update_camera_feed(self, image):
+        if image.isNull():
+            return
         pixmap = QPixmap.fromImage(image)
         if hasattr(self, 'video_label') and self.video_label.isVisible():
-            self.video_label.setPixmap(pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            w = max(1, min(self.video_label.width(), self.video_label.maximumWidth()))
+            h = max(1, min(self.video_label.height(), self.video_label.maximumHeight()))
+            self.video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         if hasattr(self, 'gcode_video_label') and self.gcode_video_label.isVisible():
-            self.gcode_video_label.setPixmap(pixmap.scaled(self.gcode_video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            w = max(1, min(self.gcode_video_label.width(), self.gcode_video_label.maximumWidth()))
+            h = max(1, min(self.gcode_video_label.height(), self.gcode_video_label.maximumHeight()))
+            self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     @Slot(str)
     def handle_camera_error(self, error_message):
@@ -1133,26 +1313,9 @@ class MainWindow(QMainWindow):
         elif event.type() == QEvent.FocusOut and isinstance(obj,QLineEdit) and obj in self.numpad_enabled_fields:
             obj.setReadOnly(False)
         return super().eventFilter(obj, event)
-
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-
-    pixmap = QPixmap(400, 200)
-    pixmap.fill(Qt.black)
-    painter = QPainter(pixmap)
-    painter.setPen(QColor(255, 255, 255))
-    font = QFont("Arial", 20, QFont.Bold)
-    painter.setFont(font)
-    painter.drawText(pixmap.rect(), Qt.AlignCenter, "PiGRBL CNC Controller")
-    painter.end()
-
-    splash = QSplashScreen(pixmap)
-    splash.show()
-    QApplication.processEvents()
-
+    # Reuse the early-created QApplication and splash shown at module import time.
     window = MainWindow(splash)
-    window.show()
-
-    splash.finish(window)
+    # Let the window attempt auto-connect while the splash is visible
+    window.run_auto_connect_with_splash(splash, timeout_ms=3000)
     sys.exit(app.exec_())
