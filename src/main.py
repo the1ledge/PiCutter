@@ -8,10 +8,10 @@ import cv2
 import math 
 import numpy as np
 from PySide2.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSplashScreen
 )
 from PySide2.QtCore import Qt, QThread, QObject, Signal, QTimer, QSettings, QEvent, Slot
-from PySide2.QtGui import QTextCursor, QImage, QPixmap, QColor
+from PySide2.QtGui import QTextCursor, QImage, QPixmap, QColor, QPainter, QFont
 
 from picamera2 import Picamera2
 
@@ -221,8 +221,12 @@ class MainWindow(QMainWindow):
     grbl_setting_received = Signal(str, str)
     probe_status_changed = Signal(bool)
 
-    def __init__(self):
+    def __init__(self, splash=None):
         super().__init__()
+        self.splash = splash
+        if self.splash:
+            self.splash.showMessage("Initializing...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            QApplication.processEvents()
         self.alarm_codes = {1:"Hard limit.",2:"Soft limit.",3:"Reset in motion.",4:"Probe fail (initial).",5:"Probe fail (no contact).",6:"Homing fail (reset).",7:"Homing fail (door).",8:"Homing fail (pull-off).",9:"Homing fail (no switch).",15:"Jog exceeds travel."}
         
         # --- THIS IS THE CORRECTED, COMPLETE DICTIONARY ---
@@ -296,10 +300,16 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
         self.numpad_enabled_fields = []
+        if self.splash:
+            self.splash.showMessage("Building UI components...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            QApplication.processEvents()
         self.build_manual_control_tab()
         self.build_gcode_tab()
         self.build_console_tab()
         self.build_settings_tab()
+        if self.splash:
+            self.splash.showMessage("Connecting signals...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            QApplication.processEvents()
         self.connect_signals()
         self.serial_connection = None
         self.serial_thread = None
@@ -345,7 +355,14 @@ class MainWindow(QMainWindow):
         self.update_ui_states()
         self.camera_thread = None
         self.camera_worker = None
+        if self.splash:
+            self.splash.showMessage("Initializing camera...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            QApplication.processEvents()
         self.start_camera()
+        if self.splash:
+            self.splash.showMessage("Ready.", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            QApplication.processEvents()
+            time.sleep(1)
 
     def build_manual_control_tab(self):
         manual_tab = QWidget()
@@ -1120,6 +1137,22 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = MainWindow()
+
+    pixmap = QPixmap(400, 200)
+    pixmap.fill(Qt.black)
+    painter = QPainter(pixmap)
+    painter.setPen(QColor(255, 255, 255))
+    font = QFont("Arial", 20, QFont.Bold)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, "PiGRBL CNC Controller")
+    painter.end()
+
+    splash = QSplashScreen(pixmap)
+    splash.show()
+    QApplication.processEvents()
+
+    window = MainWindow(splash)
     window.show()
+
+    splash.finish(window)
     sys.exit(app.exec_())
