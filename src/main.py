@@ -309,26 +309,6 @@ class SerialWorker(QObject):
                 except serial.SerialException: break
     def stop(self): self._is_running = False
 
-class MockSerialWorker(QObject):
-    serial_data_received = Signal(str)
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.timer = QTimer(self)
-        self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.send_ok_response)
-        self.is_open = True
-    @Slot(str)
-    def send_command(self, command):
-        if not self.is_open: return
-        delay = 50
-        if "G0" in command: delay = 100
-        if "$J" in command: delay = 200
-        self.timer.start(delay)
-    def send_ok_response(self): self.serial_data_received.emit("ok")
-    def stop(self):
-        self.timer.stop()
-        self.is_open = False
-
 class MainWindow(QMainWindow):
     grbl_setting_received = Signal(str, str)
     probe_status_changed = Signal(bool)
@@ -672,11 +652,9 @@ class MainWindow(QMainWindow):
         self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
         self.baud_combobox.setCurrentText("115200")
         self.refresh_button = QPushButton("Refresh Port List")
-        self.mock_grbl_checkbox = QCheckBox("Use Mock GRBL")
         connection_settings_layout.addRow("Port:", self.port_combobox)
         connection_settings_layout.addRow("Baud Rate:", self.baud_combobox)
         connection_settings_layout.addRow(self.refresh_button)
-        connection_settings_layout.addRow(self.mock_grbl_checkbox)
         connection_settings_group.setLayout(connection_settings_layout)
         left_column_layout.addWidget(connection_settings_group)
         probe_group = QGroupBox("Probe Settings")
@@ -765,13 +743,10 @@ class MainWindow(QMainWindow):
                     # choose the first available port
                     self.port_combobox.setCurrentIndex(0)
                     self.connect_serial()
-                    connected = bool(self.serial_connection and getattr(self.serial_connection, 'is_open', False)) or isinstance(self.serial_worker, MockSerialWorker)
+                    connected = bool(self.serial_connection and getattr(self.serial_connection, 'is_open', False))
                 else:
-                    # No ports found; if mock option exists, try mock connect
-                    if hasattr(self, 'mock_grbl_checkbox') and self.mock_grbl_checkbox.isEnabled():
-                        self.mock_grbl_checkbox.setChecked(True)
-                        self.connect_serial()
-                        connected = isinstance(self.serial_worker, MockSerialWorker)
+                    # No ports found
+                    connected = False
 
                 if connected:
                     splash.showMessage("Auto-connect succeeded.", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
@@ -1214,9 +1189,7 @@ class MainWindow(QMainWindow):
                 self.gcode_is_running=False; self.gcode_start_time=None; self.update_ui_states(); self.log_to_console("INFO: G-code finished."); self.gcode_progress.setFormat("Complete!")
 
     def send_command(self, command):
-        if isinstance(self.serial_worker, MockSerialWorker):
-            self.log_to_console(f"TX (Mock): {command}"); self.serial_worker.send_command(command)
-        elif self.serial_connection and self.serial_connection.is_open:
+        if self.serial_connection and self.serial_connection.is_open:
             self.log_to_console(f"TX: {command}"); self.serial_connection.write((command + '\n').encode('utf-8'))
         else:
             self.log_to_console(f"INFO: Not connected. Cmd '{command}' not sent.")
@@ -1236,8 +1209,6 @@ class MainWindow(QMainWindow):
         else: self.connect_serial()
 
     def connect_serial(self):
-        if self.mock_grbl_checkbox.isChecked():
-            self.serial_worker=MockSerialWorker(self); self.serial_worker.serial_data_received.connect(self.handle_serial_data); self.dro_timer.start(); self.connect_button.setText("Disconnect"); self.update_connection_indicator(True,is_mock=True); self.log_to_console("INFO: Connected in Mock Mode."); self.update_ui_states(); return
         port, baud = self.port_combobox.currentText(), int(self.baud_combobox.currentText())
         if not port: return
         try:
@@ -1248,9 +1219,7 @@ class MainWindow(QMainWindow):
 
     def disconnect_serial(self):
         self.dro_timer.stop()
-        if isinstance(self.serial_worker, MockSerialWorker):
-            self.serial_worker.stop(); self.log_to_console("INFO: Disconnected from Mock Mode.")
-        elif self.serial_thread:
+        if self.serial_thread:
             self.serial_worker.stop(); self.serial_thread.quit(); self.serial_thread.wait()
         if self.serial_connection: self.serial_connection.close()
         self.connect_button.setText("Connect"); self.serial_connection=self.serial_thread=self.serial_worker=None; self.update_connection_indicator(False); self.update_ui_states()
@@ -1261,10 +1230,9 @@ class MainWindow(QMainWindow):
     def pulse_alarm_button(self):
         self.unlock_button.setText(f"ALARM: {self.alarm_codes.get(self.current_alarm_code, 'UNLOCK')}"); self.alarm_pulse_state=1-self.alarm_pulse_state; self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state==0 else '#FF7043'}; color: white; font-weight: bold;")
 
-    def update_connection_indicator(self, is_connected, is_mock=False):
+    def update_connection_indicator(self, is_connected):
         if is_connected:
-            if is_mock: self.connection_status_indicator.setText("Connected (Mock)"); self.connection_status_indicator.setStyleSheet("background-color:#FFC107;color:black;font-weight:bold;")
-            else: self.connection_status_indicator.setText("Connected"); self.connection_status_indicator.setStyleSheet("background-color:green;color:white;font-weight:bold;")
+            self.connection_status_indicator.setText("Connected"); self.connection_status_indicator.setStyleSheet("background-color:green;color:white;font-weight:bold;")
         else:
             self.connection_status_indicator.setText("Disconnected"); self.connection_status_indicator.setStyleSheet("background-color:red;color:white;font-weight:bold;")
 
@@ -1308,9 +1276,17 @@ class MainWindow(QMainWindow):
         self.stop_camera(); self.disconnect_serial(); super().closeEvent(event)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.FocusIn and isinstance(obj,QLineEdit) and obj in self.numpad_enabled_fields:
-            obj.setReadOnly(True); self.show_number_pad(obj); return True
-        elif event.type() == QEvent.FocusOut and isinstance(obj,QLineEdit) and obj in self.numpad_enabled_fields:
+        if event.type() == QEvent.FocusIn and isinstance(obj, QLineEdit) and obj in self.numpad_enabled_fields:
+            if event.reason() == Qt.MouseFocusReason:
+                obj.setReadOnly(True)
+                self.show_number_pad(obj)
+                return True
+            # For non-mouse focus events on touch-enabled fields, make them read-only
+            # to prevent the virtual keyboard from appearing, but don't show the numpad.
+            # The user can still tap the field to bring up the numpad.
+            obj.setReadOnly(True)
+            return False # Allow event to propagate to not break focus chains
+        elif event.type() == QEvent.FocusOut and isinstance(obj, QLineEdit) and obj in self.numpad_enabled_fields:
             obj.setReadOnly(False)
         return super().eventFilter(obj, event)
 if __name__ == "__main__":
