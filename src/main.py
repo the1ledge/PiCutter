@@ -420,6 +420,8 @@ class MainWindow(QMainWindow):
         self.probe_succeeded = False
         self.last_probe_state = False
         self.is_advanced_probing = False
+        self.is_parking = False
+        self.parking_command_queue = []
         self.xyz_probe_stage = None
         self.probe_command_queue = []
         self.probe_results = []
@@ -581,6 +583,8 @@ class MainWindow(QMainWindow):
         gcode_actions_layout.addWidget(self.start_button)
         gcode_actions_layout.addWidget(self.pause_button)
         gcode_actions_layout.addWidget(self.stop_button)
+        self.park_on_finish_checkbox = QCheckBox("Park on Finish")
+        gcode_actions_layout.addWidget(self.park_on_finish_checkbox)
         gcode_actions_layout.addStretch()
         gcode_group_layout.addLayout(gcode_file_layout)
         gcode_group_layout.addLayout(gcode_actions_layout)
@@ -847,6 +851,8 @@ class MainWindow(QMainWindow):
         elif data.lower() == "ok":
             if self.is_advanced_probing:
                 self.send_next_probe_command()
+            elif self.is_parking:
+                self.send_next_parking_command()
             elif self.gcode_is_running:
                 executed_line_index = self.gcode_current_line - 1
                 if executed_line_index >= 0:
@@ -931,6 +937,14 @@ class MainWindow(QMainWindow):
                 if self.xyz_probe_stage in ['X_TRANSITION', 'Y_TRANSITION', 'FINALIZE']:
                     self.handle_probe_transition()
                 else: self.end_probe_cycle()
+
+    def send_next_parking_command(self):
+        if self.parking_command_queue:
+            command = self.parking_command_queue.pop(0)
+            self.send_command(command)
+        else:
+            self.is_parking = False
+            self.log_to_console("INFO: Parking sequence complete.")
 
     def start_probe_finalization(self):
         if len(self.probe_results) != 3:
@@ -1186,7 +1200,17 @@ class MainWindow(QMainWindow):
                 self.send_command(cmd)
                 self.gcode_current_line += 1
             else:
-                self.gcode_is_running=False; self.gcode_start_time=None; self.update_ui_states(); self.log_to_console("INFO: G-code finished."); self.gcode_progress.setFormat("Complete!")
+                self.gcode_is_running=False
+                self.gcode_start_time=None
+                self.update_ui_states()
+                self.gcode_progress.setFormat("Complete!")
+                if self.park_on_finish_checkbox.isChecked():
+                    self.log_to_console("INFO: G-code finished. Starting parking sequence.")
+                    self.is_parking = True
+                    self.parking_command_queue = ["M5", "G53 G0 Z0", "G28"]
+                    self.send_next_parking_command()
+                else:
+                    self.log_to_console("INFO: G-code finished.")
 
     def send_command(self, command):
         if self.serial_connection and self.serial_connection.is_open:
@@ -1239,9 +1263,11 @@ class MainWindow(QMainWindow):
     def load_settings(self):
         defaults={"probe/distance":"-25","probe/feedrate":"25","probe/thickness":"1.0","probe/slow_feedrate":"10","probe/retract_dist":"2","probe/tool_radius":"3.15"}
         for key,widget in self.get_settings_widgets().items(): widget.setText(self.settings.value(key, defaults.get(key)))
+        self.park_on_finish_checkbox.setChecked(self.settings.value("gcode/park_on_finish", True, type=bool))
 
     def save_settings(self):
         for key,widget in self.get_settings_widgets().items(): self.settings.setValue(key, widget.text())
+        self.settings.setValue("gcode/park_on_finish", self.park_on_finish_checkbox.isChecked())
         for setting,field in self.get_grbl_fields().items():
             if field.text() != self.initial_grbl_settings.get(setting,''): self.send_command(f"{setting}={field.text()}")
         self.log_to_console("INFO: Settings saved.")
