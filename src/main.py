@@ -1,4 +1,4 @@
-# v0.16.7 
+# v0.16.8
 import sys
 import os
 
@@ -153,7 +153,7 @@ class CameraWorker(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/60) 
+            time.sleep(1/60)
         if self.picam2:
             self.picam2.stop()
 
@@ -320,7 +320,7 @@ class MainWindow(QMainWindow):
             self.splash.showMessage("Initializing...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
             QApplication.processEvents()
         self.alarm_codes = {1:"Hard limit.",2:"Soft limit.",3:"Reset in motion.",4:"Probe fail (initial).",5:"Probe fail (no contact).",6:"Homing fail (reset).",7:"Homing fail (door).",8:"Homing fail (pull-off).",9:"Homing fail (no switch).",15:"Jog exceeds travel."}
-        
+
         # --- THIS IS THE CORRECTED, COMPLETE DICTIONARY ---
         self.GRBL_SETTINGS_INFO = {
             "$0": {"label": "Step pulse time (μs)", "tooltip": "Sets the step pulse duration. A value around 10 microseconds is recommended."},
@@ -433,6 +433,11 @@ class MainWindow(QMainWindow):
         self.gcode_start_time = None
         self.gcode_estimated_time = 0
         self.gcode_line_times = []
+        
+        # *** FIX: Initialize attributes here ***
+        self.command_queue = []
+        self.command_pending = False
+        
         self.dro_timer = QTimer(self)
         self.dro_timer.setInterval(200)
         self.dro_timer.timeout.connect(lambda: self.send_command("?"))
@@ -470,12 +475,12 @@ class MainWindow(QMainWindow):
         self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
         left_column_layout = QVBoxLayout()
         left_column_layout.setAlignment(Qt.AlignTop)
-        spindle_group = QGroupBox("Spindle")
+        spindle_group = QGroupBox()
         spindle_layout = QFormLayout()
         self.spindle_speed_input = QLineEdit("1000")
         self.numpad_enabled_fields.append(self.spindle_speed_input)
         self.spindle_speed_input.installEventFilter(self)
-        spindle_layout.addRow("Speed (RPM):", self.spindle_speed_input)
+        spindle_layout.addRow("Spindle Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
         left_column_layout.addWidget(spindle_group)
@@ -570,10 +575,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(gcode_tab, "G-Code Sender")
         main_gcode_layout = QHBoxLayout(gcode_tab)
         left_panel_layout = QVBoxLayout()
-        gcode_group = QGroupBox("G-Code File")
+        gcode_group = QGroupBox()
         gcode_group_layout = QVBoxLayout()
         gcode_file_layout = QHBoxLayout()
-        self.load_file_button = QPushButton("Load File")
+        self.load_file_button = QPushButton("Load G-code")
         self.gcode_file_label = QLabel("No file loaded.")
         gcode_file_layout.addWidget(self.load_file_button)
         gcode_file_layout.addWidget(self.gcode_file_label, 1)
@@ -814,8 +819,19 @@ class MainWindow(QMainWindow):
         self.console_output.insertPlainText(message + '\n')
 
     def handle_serial_data(self, data):
-        self.log_to_console(f"RX: {data}")
         if data.startswith("<"):
+            # Parse buffer status
+            buffer_match = re.search(r"Bf:(\d+),(\d+)", data)
+            if buffer_match:
+                self.planner_buffer_blocks = int(buffer_match.group(1))
+                self.rx_buffer_bytes = int(buffer_match.group(2))
+                self.log_to_console(f"DEBUG: Buffer Status - Planner:{self.planner_buffer_blocks} RX:{self.rx_buffer_bytes}")
+                # Try to send any buffered commands now that we have space
+                if self.command_queue and not self.command_pending:
+                    next_command = self.command_queue[0]
+                    if self.send_command(next_command):
+                        self.command_queue.pop(0)
+
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
                 self.is_homed = True
@@ -849,6 +865,7 @@ class MainWindow(QMainWindow):
                 self.wpos_y_label.setText(f"{wpos_y:.3f}")
                 self.wpos_z_label.setText(f"{wpos_z:.3f}")
         elif data.lower() == "ok":
+            self.command_pending = False  # Clear the pending flag on acknowledgment
             if self.is_advanced_probing:
                 self.send_next_probe_command()
             elif self.is_parking:
@@ -875,6 +892,12 @@ class MainWindow(QMainWindow):
                 else:
                     self.current_alarm_code = code
                     self.machine_state = "Alarm"
+                    # Reset any special sequences that might have been running
+                    if self.is_parking:
+                        self.is_parking = False
+                        self.parking_command_queue = []
+                    if self.is_advanced_probing:
+                        self.end_probe_cycle() # Use existing method to clean up
                     self.update_ui_states()
                 self.log_to_console(f"ALARM: {self.alarm_codes.get(code, 'Unknown alarm code.')}")
             except (ValueError, IndexError):
@@ -944,7 +967,22 @@ class MainWindow(QMainWindow):
             self.send_command(command)
         else:
             self.is_parking = False
+            self.gcode_is_running = False  # Now the job is truly over
+            self.gcode_start_time = None
+            self.update_ui_states()
             self.log_to_console("INFO: Parking sequence complete.")
+
+    def start_parking_sequence(self):
+        self.log_to_console("INFO: G-code file processed. Starting parking sequence.")
+        self.parking_command_queue = [
+            "M5",              # Stop spindle
+            "G4 P0.1",        # Dwell for 0.1s to ensure spindle stops
+            "G90",            # Absolute positioning
+            "G53 G0 Z-1",     # Move to machine Z-1 (safe height) in machine coordinates
+            "G4 P0.1",        # Dwell for 0.1s to ensure Z move completes
+            "G28"             # Return to predefined parking position
+        ]
+        self.send_next_parking_command()
 
     def start_probe_finalization(self):
         if len(self.probe_results) != 3:
@@ -1189,7 +1227,6 @@ class MainWindow(QMainWindow):
         mins, secs = divmod(time_left, 60)
         time_str = f"{int(mins)}m {int(secs)}s"
         self.gcode_progress.setFormat(f"{percent:.1f}% | Est. {time_str} remaining")
-        self.log_to_console(f"DEBUG: Time Calc: {time_done:.1f}s done / {self.gcode_estimated_time:.1f}s total -> {time_left:.1f}s left")
 
     def send_next_gcode_line(self):
         if self.gcode_is_running and not self.gcode_is_paused:
@@ -1200,23 +1237,43 @@ class MainWindow(QMainWindow):
                 self.send_command(cmd)
                 self.gcode_current_line += 1
             else:
-                self.gcode_is_running=False
-                self.gcode_start_time=None
-                self.update_ui_states()
-                self.gcode_progress.setFormat("Complete!")
-                if self.park_on_finish_checkbox.isChecked():
-                    self.log_to_console("INFO: G-code finished. Starting parking sequence.")
+                # G-code file is done, transition to parking or finish up.
+                if self.park_on_finish_checkbox.isChecked() and not self.is_parking:
+                    # Set lock flag immediately to prevent re-entry, then start parking.
                     self.is_parking = True
-                    self.parking_command_queue = ["M5", "G53 G0 Z0", "G28"]
-                    self.send_next_parking_command()
-                else:
+                    self.start_parking_sequence()
+                elif not self.is_parking:
+                    # This branch is taken if parking is disabled, or on subsequent entries
+                    # after the parking sequence has been initiated. We only want to
+                    # finalize the job if we are NOT about to park.
+                    self.gcode_is_running = False
+                    self.gcode_start_time = None
+                    self.update_ui_states()
+                    self.gcode_progress.setFormat("Complete!")
                     self.log_to_console("INFO: G-code finished.")
 
     def send_command(self, command):
-        if self.serial_connection and self.serial_connection.is_open:
-            self.log_to_console(f"TX: {command}"); self.serial_connection.write((command + '\n').encode('utf-8'))
-        else:
+        if not self.serial_connection or not self.serial_connection.is_open:
             self.log_to_console(f"INFO: Not connected. Cmd '{command}' not sent.")
+            return False
+
+        # Don't check buffers for status queries
+        if not command.startswith('?'):
+            # Wait for minimum buffer space
+            MIN_RX_BUFFER = 30  # Leave room for responses
+            MIN_PLANNER_BLOCKS = 5  # Keep some planner blocks free
+
+            if self.rx_buffer_bytes < MIN_RX_BUFFER or self.planner_buffer_blocks < MIN_PLANNER_BLOCKS:
+                self.log_to_console(f"DEBUG: Flow Control - Buffering command: {command} (RX:{self.rx_buffer_bytes} < {MIN_RX_BUFFER} or Planner:{self.planner_buffer_blocks} < {MIN_PLANNER_BLOCKS})")
+                self.command_queue.append(command)
+                return True
+
+            self.log_to_console(f"DEBUG: Flow Control - Command: {command}, RX Buffer: {self.rx_buffer_bytes}, Planner: {self.planner_buffer_blocks}, Pending: {self.command_pending}")
+
+        self.serial_connection.write((command + '\n').encode('utf-8'))
+        if not command.startswith('?'):
+            self.command_pending = True
+        return True
 
     def send_console_command(self):
         cmd = self.command_input.text()
