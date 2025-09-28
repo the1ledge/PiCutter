@@ -312,6 +312,9 @@ class SerialWorker(QObject):
 class MainWindow(QMainWindow):
     grbl_setting_received = Signal(str, str)
     probe_status_changed = Signal(bool)
+    gcode_line_sent = Signal(int)
+    gcode_line_executed = Signal(int)
+    gcode_job_error = Signal(str)
 
     def __init__(self, splash=None):
         super().__init__()
@@ -433,14 +436,12 @@ class MainWindow(QMainWindow):
         self.gcode_start_time = None
         self.gcode_estimated_time = 0
         self.gcode_line_times = []
-        
-        # *** FIX: Initialize attributes here ***
-        self.command_queue = []
         self.command_pending = False
-        
+        self.planner_buffer_blocks = 0
+        self.rx_buffer_bytes = 0
         self.dro_timer = QTimer(self)
-        self.dro_timer.setInterval(200)
-        self.dro_timer.timeout.connect(lambda: self.send_command("?"))
+        self.dro_timer.setInterval(100) # Faster timer for smoother streaming
+        self.dro_timer.timeout.connect(self.request_status_and_send_next)
         self.home_pulse_timer = QTimer(self)
         self.home_pulse_timer.setInterval(500)
         self.home_pulse_timer.timeout.connect(self.pulse_home_button)
@@ -725,6 +726,38 @@ class MainWindow(QMainWindow):
         self.grbl_setting_received.connect(self.update_grbl_setting)
         self.send_button.clicked.connect(self.send_console_command)
         self.command_input.returnPressed.connect(self.send_console_command)
+        self.gcode_line_sent.connect(self.on_gcode_line_sent)
+        self.gcode_line_executed.connect(self.on_gcode_line_executed)
+        self.gcode_job_error.connect(self.on_gcode_job_error)
+
+    def on_gcode_line_sent(self, line_index):
+        if line_index >= 0:
+            item = QTableWidgetItem("Sent")
+            self.gcode_table.setItem(line_index, 2, item)
+            self.gcode_table.item(line_index, 2).setBackground(QColor("yellow"))
+            self.gcode_table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+
+    def on_gcode_line_executed(self, line_index):
+        if line_index >= 0:
+            item = QTableWidgetItem("Executed")
+            self.gcode_table.setItem(line_index, 2, item)
+            self.gcode_table.item(line_index, 2).setBackground(QColor("lightgreen"))
+            self.update_progress_display()
+
+    def on_gcode_job_error(self, error_message):
+        if self.gcode_is_running:
+            self.gcode_is_running = False
+            self.gcode_is_paused = False
+            self.update_ui_states()
+            self.log_to_console(f"ERROR: G-code job stopped due to GRBL error: {error_message}")
+            # Use a non-modal dialog to avoid freezing the app
+            error_dialog = QMessageBox(self)
+            error_dialog.setIcon(QMessageBox.Critical)
+            error_dialog.setText("G-Code Job Error")
+            error_dialog.setInformativeText(f"The job was halted due to a GRBL error:\n\n{error_message}")
+            error_dialog.setStandardButtons(QMessageBox.Ok)
+            error_dialog.setModal(False)
+            error_dialog.show()
 
     def run_auto_connect_with_splash(self, splash, timeout_ms=3000):
         """Attempt an automatic connection while the provided splash is visible.
@@ -819,18 +852,16 @@ class MainWindow(QMainWindow):
         self.console_output.insertPlainText(message + '\n')
 
     def handle_serial_data(self, data):
+        self.log_to_console(f"RX: {data}")
         if data.startswith("<"):
-            # Parse buffer status
+            # Parse buffer status if present
             buffer_match = re.search(r"Bf:(\d+),(\d+)", data)
             if buffer_match:
                 self.planner_buffer_blocks = int(buffer_match.group(1))
                 self.rx_buffer_bytes = int(buffer_match.group(2))
-                self.log_to_console(f"DEBUG: Buffer Status - Planner:{self.planner_buffer_blocks} RX:{self.rx_buffer_bytes}")
-                # Try to send any buffered commands now that we have space
-                if self.command_queue and not self.command_pending:
-                    next_command = self.command_queue[0]
-                    if self.send_command(next_command):
-                        self.command_queue.pop(0)
+                # Now that we have fresh buffer data, try to send the next line.
+                if self.gcode_is_running:
+                    self.send_next_gcode_line()
 
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
@@ -865,24 +896,31 @@ class MainWindow(QMainWindow):
                 self.wpos_y_label.setText(f"{wpos_y:.3f}")
                 self.wpos_z_label.setText(f"{wpos_z:.3f}")
         elif data.lower() == "ok":
-            self.command_pending = False  # Clear the pending flag on acknowledgment
+            self.command_pending = False
             if self.is_advanced_probing:
                 self.send_next_probe_command()
             elif self.is_parking:
                 self.send_next_parking_command()
-            elif self.gcode_is_running:
-                executed_line_index = self.gcode_current_line - 1
-                if executed_line_index >= 0:
-                    item = QTableWidgetItem("Executed")
-                    self.gcode_table.setItem(executed_line_index, 2, item)
-                    self.gcode_table.item(executed_line_index, 2).setBackground(QColor("lightgreen"))
-                    self.update_progress_display()
+            elif self.gcode_is_running and not self.gcode_is_paused:
+                # Emit a signal to update the UI from the main thread
+                self.gcode_line_executed.emit(self.gcode_current_line - 1)
                 self.send_next_gcode_line()
-        elif data.startswith("error:15"):
-            if self.last_jog_button:
+        elif data.startswith("error:"):
+            self.log_to_console(f"DEBUG: Received '{data}', clearing command_pending.")
+            self.command_pending = False
+
+            # If a G-code job was running, HALT THE MACHINE IMMEDIATELY.
+            if self.gcode_is_running:
+                self.serial_connection.write(b'\x18') # Send soft-reset
+                self.serial_connection.flush() # Ensure the halt command is sent immediately.
+                self.log_to_console("CRITICAL: GRBL error during job. Sent immediate soft-reset (\\x18) to halt machine.")
+                # Then, signal the main thread to update the UI and notify the user.
+                self.gcode_job_error.emit(data)
+
+            # Special UI handling for jog errors (can happen outside of a job)
+            if "error:15" in data and self.last_jog_button:
                 self.flash_jog_button(self.last_jog_button)
                 self.last_jog_button = None
-            self.log_to_console(f"ERROR: {self.alarm_codes.get(15, 'Jog target exceeds travel.')}")
         elif data.startswith("ALARM:"):
             try:
                 code = int(data.split(':')[1])
@@ -1133,10 +1171,25 @@ class MainWindow(QMainWindow):
     def update_ui_states(self):
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
         file_loaded = bool(self.gcode_lines)
-        self.start_button.setEnabled(is_connected and file_loaded and not self.gcode_is_running)
-        self.pause_button.setEnabled(is_connected and self.gcode_is_running)
-        self.stop_button.setEnabled(is_connected and self.gcode_is_running)
-        for w in [self.home_button,self.unlock_button,self.run_probe_button,self.run_3axis_probe_button,self.set_location_button,self.go_to_location_button,self.e_stop_button,self.spindle_on_button,self.spindle_off_button,self.spindle_speed_input]: w.setEnabled(is_connected)
+        job_running = self.gcode_is_running
+
+        # G-code execution controls
+        self.start_button.setEnabled(is_connected and file_loaded and not job_running)
+        self.pause_button.setEnabled(is_connected and job_running)
+        self.stop_button.setEnabled(is_connected and job_running)
+
+        # Manual and setup controls are disabled during a job, except for critical overrides
+        can_use_manual_controls = is_connected and not job_running
+        for w in [self.home_button, self.unlock_button, self.run_probe_button, self.run_3axis_probe_button,
+                  self.set_location_button, self.go_to_location_button,
+                  self.x_plus_button, self.x_minus_button, self.y_plus_button, self.y_minus_button,
+                  self.z_plus_button, self.z_minus_button, self.step_size_combo]:
+            w.setEnabled(can_use_manual_controls)
+
+        # Spindle and E-Stop are always available when connected
+        for w in [self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input]:
+            w.setEnabled(is_connected)
+
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
         self.home_pulse_timer.stop(); self.alarm_pulse_timer.stop()
         self.home_button.setStyleSheet(""); self.unlock_button.setStyleSheet(""); self.run_probe_button.setStyleSheet("")
@@ -1228,24 +1281,37 @@ class MainWindow(QMainWindow):
         time_str = f"{int(mins)}m {int(secs)}s"
         self.gcode_progress.setFormat(f"{percent:.1f}% | Est. {time_str} remaining")
 
+    def request_status_and_send_next(self):
+        """Periodically called by a timer to request machine status."""
+        self.send_command("?")
+
     def send_next_gcode_line(self):
         if self.gcode_is_running and not self.gcode_is_paused:
             if self.gcode_current_line < len(self.gcode_lines):
+                # Full Hybrid Flow Control:
+                # 1. Check if we are waiting for an 'ok' from a previous command.
+                if self.command_pending:
+                    return
+
+                # 2. Check if GRBL's planner buffer has a safety margin.
+                if self.planner_buffer_blocks < 3: # Wait for at least 3 free blocks.
+                    return
+
+                # 3. Check if GRBL's RX buffer has space for the next command.
                 cmd = self.gcode_lines[self.gcode_current_line]
-                self.log_to_console(f"DEBUG: Sending L:{self.gcode_current_line + 1}/{len(self.gcode_lines)} -> {cmd}")
-                item = QTableWidgetItem("Sent"); self.gcode_table.setItem(self.gcode_current_line, 2, item); self.gcode_table.item(self.gcode_current_line, 2).setBackground(QColor("yellow")); self.gcode_table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-                self.send_command(cmd)
-                self.gcode_current_line += 1
+                if (len(cmd) + 1) >= self.rx_buffer_bytes:
+                    return
+
+                self.log_to_console(f"DEBUG: Sending L:{self.gcode_current_line + 1}/{len(self.gcode_lines)} -> {cmd} (Bf:{self.planner_buffer_blocks},{self.rx_buffer_bytes})")
+                if self.send_command(cmd):
+                    self.gcode_line_sent.emit(self.gcode_current_line)
+                    self.gcode_current_line += 1
             else:
                 # G-code file is done, transition to parking or finish up.
                 if self.park_on_finish_checkbox.isChecked() and not self.is_parking:
-                    # Set lock flag immediately to prevent re-entry, then start parking.
                     self.is_parking = True
                     self.start_parking_sequence()
                 elif not self.is_parking:
-                    # This branch is taken if parking is disabled, or on subsequent entries
-                    # after the parking sequence has been initiated. We only want to
-                    # finalize the job if we are NOT about to park.
                     self.gcode_is_running = False
                     self.gcode_start_time = None
                     self.update_ui_states()
@@ -1257,22 +1323,17 @@ class MainWindow(QMainWindow):
             self.log_to_console(f"INFO: Not connected. Cmd '{command}' not sent.")
             return False
 
-        # Don't check buffers for status queries
-        if not command.startswith('?'):
-            # Wait for minimum buffer space
-            MIN_RX_BUFFER = 30  # Leave room for responses
-            MIN_PLANNER_BLOCKS = 5  # Keep some planner blocks free
+        if self.command_pending and command not in ['?', '!', '~', '\x18']:
+            self.log_to_console(f"DEBUG: Command '{command}' blocked, command_pending is True.")
+            return False
 
-            if self.rx_buffer_bytes < MIN_RX_BUFFER or self.planner_buffer_blocks < MIN_PLANNER_BLOCKS:
-                self.log_to_console(f"DEBUG: Flow Control - Buffering command: {command} (RX:{self.rx_buffer_bytes} < {MIN_RX_BUFFER} or Planner:{self.planner_buffer_blocks} < {MIN_PLANNER_BLOCKS})")
-                self.command_queue.append(command)
-                return True
-
-            self.log_to_console(f"DEBUG: Flow Control - Command: {command}, RX Buffer: {self.rx_buffer_bytes}, Planner: {self.planner_buffer_blocks}, Pending: {self.command_pending}")
-
+        self.log_to_console(f"TX: {command}")
         self.serial_connection.write((command + '\n').encode('utf-8'))
-        if not command.startswith('?'):
+
+        if command not in ['?', '!', '~', '\x18']:
             self.command_pending = True
+            self.log_to_console(f"DEBUG: Set command_pending=True for '{command}'")
+
         return True
 
     def send_console_command(self):
