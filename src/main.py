@@ -1011,14 +1011,12 @@ class MainWindow(QMainWindow):
             self.log_to_console("INFO: Parking sequence complete.")
 
     def start_parking_sequence(self):
-        self.log_to_console("INFO: G-code file processed. Starting parking sequence.")
+        self.log_to_console("INFO: G-code file processed. Starting safe parking sequence.")
         self.parking_command_queue = [
-            "M5",              # Stop spindle
-            "G4 P0.1",        # Dwell for 0.1s to ensure spindle stops
-            "G90",            # Absolute positioning
-            "G53 G0 Z-1",     # Move to machine Z-1 (safe height) in machine coordinates
-            "G4 P0.1",        # Dwell for 0.1s to ensure Z move completes
-            "G28"             # Return to predefined parking position
+            "M5",           # Stop spindle
+            "G90",          # Absolute positioning
+            "G53 G0 Z-1",   # Retract Z to a safe height in machine coordinates
+            "G53 G0 X0 Y0"  # Move to machine XY origin
         ]
         self.send_next_parking_command()
 
