@@ -962,6 +962,7 @@ class MainWindow(QMainWindow):
                 self.log_to_console(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
 
     def run_probe_cycle(self):
+        self.xyz_probe_stage = None  # Prevent stale state from previous 3-axis probe
         self.is_manually_zeroed = self.z_is_auto_zeroed = False
         arm_dialog = ProbeArmDialog(self)
         arm_dialog.e_stop_button.clicked.connect(self.emergency_stop)
@@ -997,7 +998,8 @@ class MainWindow(QMainWindow):
             elif self.probe_phase == 'finalizing':
                 if self.xyz_probe_stage in ['X_TRANSITION', 'Y_TRANSITION', 'FINALIZE']:
                     self.handle_probe_transition()
-                else: self.end_probe_cycle()
+                elif self.xyz_probe_stage == 'DONE':
+                    self.end_probe_cycle()
 
     def send_next_parking_command(self):
         if self.parking_command_queue:
@@ -1039,6 +1041,7 @@ class MainWindow(QMainWindow):
             self.log_to_console(f"INFO: Z-Probe successful. Avg: {avg_pos:.4f}mm. Setting Z-WCO.")
             if not self.xyz_probe_stage:
                 self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}", f"G90 G0 Z{thickness + 10}"]
+                self.xyz_probe_stage = 'DONE'
             else:
                 self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}","G91 G0 Z10","G91 G0 X-25"]
                 self.xyz_probe_stage = 'X_TRANSITION'
