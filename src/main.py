@@ -1134,11 +1134,26 @@ class MainWindow(QMainWindow):
     def go_to_location(self):
         locations = [f"Work Origin G{54+i}" for i in range(6)] + ["Safe Position (G28)"]
         choice = LocationDialog.get_selected_index(self, "Go To", locations, "Select destination:")
-        if choice == -1: return
+        if choice == -1:
+            return
+
         if choice < 6:
-            self.send_command(f"G{54+choice}")
-            self.send_command("G90 G0 X0 Y0")
+            # This is a multi-command sequence. Use the probe queue to ensure sequential execution.
+            # 1. Set up the state machine to handle a generic command sequence.
+            self.is_advanced_probing = True
+            self.probe_phase = 'finalizing'  # Skips result processing
+            self.xyz_probe_stage = 'DONE'      # Ensures it cleans up after the queue is empty
+
+            # 2. Clear any old commands and add the new ones.
+            self.probe_command_queue.clear()
+            self.probe_command_queue.append(f"G{54+choice}")
+            self.probe_command_queue.append("G90 G0 X0 Y0")
+
+            # 3. Start the sequence.
+            self.send_next_probe_command()
+            self.log_to_console(f"INFO: Queued 'Go To G{54+choice}' command sequence.")
         else:
+            # This is a single command, safe to send directly.
             self.send_command("G28")
 
     def load_gcode_file(self):
