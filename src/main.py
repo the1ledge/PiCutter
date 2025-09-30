@@ -425,6 +425,8 @@ class MainWindow(QMainWindow):
         self.is_advanced_probing = False
         self.is_parking = False
         self.parking_command_queue = []
+        self.is_running_generic_queue = False
+        self.generic_command_queue = []
         self.xyz_probe_stage = None
         self.probe_command_queue = []
         self.probe_results = []
@@ -901,6 +903,8 @@ class MainWindow(QMainWindow):
                 self.send_next_probe_command()
             elif self.is_parking:
                 self.send_next_parking_command()
+            elif self.is_running_generic_queue:
+                self.send_next_generic_command()
             elif self.gcode_is_running and not self.gcode_is_paused:
                 # Emit a signal to update the UI from the main thread
                 self.gcode_line_executed.emit(self.gcode_current_line - 1)
@@ -953,7 +957,11 @@ class MainWindow(QMainWindow):
                     elif self.xyz_probe_stage == 'Y': val = float(prb_match.group(2))
                     else: val = float(prb_match.group(3)) # Fallback for Z-only
                     self.probe_results.append(val)
-            else: # Legacy single-probe logic
+                    # Data-driven trigger: if we have all 3 slow-probe results,
+                    # immediately process them without waiting for the 'ok'.
+                    if len(self.probe_results) == 3:
+                        self.send_next_probe_command()
+            elif self.is_probing: # Legacy single-probe logic
                 self.is_probing = False
                 self.probe_succeeded = True
                 self.update_ui_states()
@@ -992,9 +1000,14 @@ class MainWindow(QMainWindow):
 
     def send_next_probe_command(self):
         if self.probe_command_queue:
-            self.send_command(self.probe_command_queue.pop(0))
+            command = self.probe_command_queue[0]
+            if self.send_command(command):
+                self.probe_command_queue.pop(0)
         else:
-            if self.probe_phase == 'probing': self.start_probe_finalization()
+            # Data-driven guard: Only finalize if the queue is empty AND we have 3 results.
+            # This prevents a premature 'ok' from advancing the state machine.
+            if self.probe_phase == 'probing' and len(self.probe_results) == 3:
+                self.start_probe_finalization()
             elif self.probe_phase == 'finalizing':
                 if self.xyz_probe_stage in ['X_TRANSITION', 'Y_TRANSITION', 'FINALIZE']:
                     self.handle_probe_transition()
@@ -1003,14 +1016,24 @@ class MainWindow(QMainWindow):
 
     def send_next_parking_command(self):
         if self.parking_command_queue:
-            command = self.parking_command_queue.pop(0)
-            self.send_command(command)
+            command = self.parking_command_queue[0]
+            if self.send_command(command):
+                self.parking_command_queue.pop(0)
         else:
             self.is_parking = False
             self.gcode_is_running = False  # Now the job is truly over
             self.gcode_start_time = None
             self.update_ui_states()
             self.log_to_console("INFO: Parking sequence complete.")
+
+    def send_next_generic_command(self):
+        if self.generic_command_queue:
+            command = self.generic_command_queue[0]
+            if self.send_command(command):
+                self.generic_command_queue.pop(0)
+        else:
+            self.is_running_generic_queue = False
+            self.log_to_console("INFO: Generic command sequence complete.")
 
     def start_parking_sequence(self):
         self.log_to_console("INFO: G-code file processed. Starting safe parking sequence.")
@@ -1141,19 +1164,12 @@ class MainWindow(QMainWindow):
             return
 
         if choice < 6:
-            # This is a multi-command sequence. Use the probe queue to ensure sequential execution.
-            # 1. Set up the state machine to handle a generic command sequence.
-            self.is_advanced_probing = True
-            self.probe_phase = 'finalizing'  # Skips result processing
-            self.xyz_probe_stage = 'DONE'      # Ensures it cleans up after the queue is empty
-
-            # 2. Clear any old commands and add the new ones.
-            self.probe_command_queue.clear()
-            self.probe_command_queue.append(f"G{54+choice}")
-            self.probe_command_queue.append("G90 G0 X0 Y0")
-
-            # 3. Start the sequence.
-            self.send_next_probe_command()
+            # Use the new generic command queue to avoid state corruption
+            self.generic_command_queue.clear()
+            self.generic_command_queue.append(f"G{54+choice}")
+            self.generic_command_queue.append("G90 G0 X0 Y0")
+            self.is_running_generic_queue = True
+            self.send_next_generic_command()
             self.log_to_console(f"INFO: Queued 'Go To G{54+choice}' command sequence.")
         else:
             # This is a single command, safe to send directly.
