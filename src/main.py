@@ -323,6 +323,42 @@ class MainWindow(QMainWindow):
             self.splash.showMessage("Initializing...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
             QApplication.processEvents()
         self.alarm_codes = {1:"Hard limit.",2:"Soft limit.",3:"Reset in motion.",4:"Probe fail (initial).",5:"Probe fail (no contact).",6:"Homing fail (reset).",7:"Homing fail (door).",8:"Homing fail (pull-off).",9:"Homing fail (no switch).",15:"Jog exceeds travel."}
+        self.error_codes = {
+            1: "Expected G-code word: The command is missing a required word (e.g., G1, M3).",
+            2: "Bad number format: A number in the command is invalid or has too many digits.",
+            3: "Invalid statement: The command is unknown or unsupported.",
+            4: "Negative value: A negative value was used where it's not allowed (e.g., feed rate).",
+            5: "Homing not enabled: A homing cycle ($H) was requested but isn't enabled in settings.",
+            6: "Min step pulse time violated: Step pulse was issued faster than configured ($0).",
+            7: "EEPROM read fail: Grbl could not read its settings. May indicate hardware issues.",
+            8: "Not idle: A command was sent that requires the machine to be idle.",
+            9: "G-code lockout: A G-code command was blocked due to machine state (e.g., after alarm).",
+            10: "Homing not set: The machine requires homing ($H) to establish position first.",
+            11: "Line overflow: A G-code line was too long for Grbl's buffer.",
+            12: "Step rate too high: Commanded speed exceeds the machine's maximum step rate.",
+            13: "Safety door open: Command blocked because the safety door is open.",
+            14: "Build info overflow: Build info string exceeded character limit.",
+            15: "Setting disabled: A command depends on a feature that is disabled (e.g., soft limits).",
+            16: "Negative value in settings: A setting was set to a negative number.",
+            17: "Invalid jog command: The jog command is improperly formatted.",
+            20: "Unsupported command: The command is not supported by Grbl.",
+            21: "Modal group violation: Two commands from the same modal group (e.g., G0 and G1) on one line.",
+            22: "Undefined feed rate: A motion command was issued without a feed rate (F) being set.",
+            23: "Axis command conflict: Two axis words used inappropriately (e.g., in arcs, jogs).",
+            24: "Invalid target: The target position is invalid (e.g., an impossible arc).",
+            25: "Invalid arc radius: The arc command has an invalid radius value.",
+            26: "Invalid G-code word: A word was used in the wrong context (e.g., I/J in G1 mode).",
+            27: "Invalid line number: A line number (N) was used incorrectly.",
+            28: "Value word repeated: A G-code word was used more than once on the same line.",
+            29: "G59.x WCS error: A G59.1, G59.2, or G59.3 work coordinate system was used.",
+            30: "G53 with offset: G53 (machine coordinates) cannot be used with G54-G59 offsets.",
+            31: "Invalid real value: A number is invalid (e.g., NaN, too many decimals).",
+            32: "Arc axis missing: An arc command (G2/G3) is missing a required axis word.",
+            33: "Arc format error: Arc command has incorrect or conflicting data.",
+            34: "No axis word in motion: A motion command was issued without specifying an axis.",
+            35: "G2/G3 not allowed: Arc motions are not allowed in the current state (e.g., jogging).",
+            36: "Unused words: Extra words were found that don't apply to the current command."
+        }
 
         # --- THIS IS THE CORRECTED, COMPLETE DICTIONARY ---
         self.GRBL_SETTINGS_INFO = {
@@ -751,12 +787,30 @@ class MainWindow(QMainWindow):
             self.gcode_is_running = False
             self.gcode_is_paused = False
             self.update_ui_states()
-            self.log_to_console(f"ERROR: G-code job stopped due to GRBL error: {error_message}")
-            # Use a non-modal dialog to avoid freezing the app
+
+            # --- Enhanced Error Reporting ---
+            error_code_num = None
+            try:
+                # Extract the numeric code, e.g., '2' from 'error:2'
+                error_code_num = int(re.search(r'\d+', error_message).group())
+            except (ValueError, AttributeError):
+                pass # Keep error_code_num as None if parsing fails
+
+            # Look up the detailed description
+            detailed_error = self.error_codes.get(error_code_num, f"An unknown error occurred: {error_message}")
+
+            # Log the enhanced error to the console
+            self.log_to_console(f"ERROR: G-code job stopped due to GRBL error: {error_message} - {detailed_error}")
+
+            # Create a non-modal dialog to avoid freezing the app
             error_dialog = QMessageBox(self)
             error_dialog.setIcon(QMessageBox.Critical)
             error_dialog.setText("G-Code Job Error")
-            error_dialog.setInformativeText(f"The job was halted due to a GRBL error:\n\n{error_message}")
+            # Display the detailed, user-friendly message
+            informative_text = f"The job was halted due to a GRBL error:\n\n"
+            informative_text += f"'{error_message}'\n"
+            informative_text += f"{detailed_error}"
+            error_dialog.setInformativeText(informative_text)
             error_dialog.setStandardButtons(QMessageBox.Ok)
             error_dialog.setModal(False)
             error_dialog.show()
@@ -850,8 +904,13 @@ class MainWindow(QMainWindow):
     def log_to_console(self, message):
         if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'): return
         if self.filter_pos_checkbox.isChecked() and message.startswith('RX: <') and 'MPos:' in message: return
+
+        log_message = message
+        if message.startswith("DEBUG:"):
+            log_message = f"# {message}"
+
         self.console_output.moveCursor(QTextCursor.Start)
-        self.console_output.insertPlainText(message + '\n')
+        self.console_output.insertPlainText(log_message + '\n')
 
     def handle_serial_data(self, data):
         self.log_to_console(f"RX: {data}")
