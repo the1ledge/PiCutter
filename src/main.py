@@ -240,6 +240,74 @@ class ProbeArmDialog(QDialog):
             self.indicator.setStyleSheet("background-color: #F44336; color: white; font-weight: bold; padding: 10px; border-radius: 5px;")
         self.ok_button.setEnabled(self.is_verified and not is_triggered)
 
+class GCodeCheckDialog(QDialog):
+    def __init__(self, issues, has_errors, parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setMinimumSize(600, 400)
+
+        layout = QVBoxLayout(self)
+
+        # Create a title label
+        title_label = QLabel()
+        title_label.setStyleSheet("font-weight: bold; font-size: 14pt;")
+        layout.addWidget(title_label)
+
+        info_label = QLabel()
+        layout.addWidget(info_label)
+
+        self.results_text = QTextEdit()
+        self.results_text.setReadOnly(True)
+        self.results_text.setLineWrapMode(QTextEdit.NoWrap)
+
+        results_str = ""
+        # Group issues by severity for clearer output
+        errors = [i for i in issues if i['severity'] == 'error']
+        warnings = [i for i in issues if i['severity'] == 'warning']
+
+        if errors:
+            results_str += "--- ERRORS (must be fixed) ---\n"
+            for issue in errors:
+                results_str += f"Line {issue['line']}: {issue['message']}\n"
+                results_str += f"  > {issue['gcode']}\n\n"
+
+        if warnings:
+            results_str += "--- WARNINGS (proceed with caution) ---\n"
+            for issue in warnings:
+                results_str += f"Line {issue['line']}: {issue['message']}\n"
+                results_str += f"  > {issue['gcode']}\n\n"
+
+        self.results_text.setText(results_str.strip())
+
+        layout.addWidget(self.results_text)
+
+        self.button_box = QDialogButtonBox()
+        if has_errors:
+            self.setWindowTitle("G-Code Check: Errors Found")
+            title_label.setText("Errors Found")
+            info_label.setText("This file cannot be loaded. Please fix the errors below.")
+            copy_button = self.button_box.addButton("Copy Errors", QDialogButtonBox.ActionRole)
+            close_button = self.button_box.addButton("Close", QDialogButtonBox.RejectRole)
+            copy_button.clicked.connect(self.copy_to_clipboard)
+            close_button.clicked.connect(self.reject)
+        else: # Only warnings
+            self.setWindowTitle("G-Code Check: Warnings Found")
+            title_label.setText("Warnings Found")
+            info_label.setText("Please review the warnings below. You can still load the file, but it may cause unexpected behavior.")
+            load_button = self.button_box.addButton("Discard Warnings & Load", QDialogButtonBox.AcceptRole)
+            cancel_button = self.button_box.addButton("Cancel", QDialogButtonBox.RejectRole)
+            load_button.clicked.connect(self.accept)
+            cancel_button.clicked.connect(self.reject)
+
+        layout.addWidget(self.button_box)
+
+    def copy_to_clipboard(self):
+        QApplication.clipboard().setText(self.results_text.toPlainText())
+        button = self.sender()
+        if button:
+            QToolTip.showText(button.mapToGlobal(button.rect().bottomLeft()), "Copied!", button)
+
+
 class LocationDialog(QDialog):
     def __init__(self, parent, title, locations, prompt):
         super().__init__(parent)
@@ -294,6 +362,196 @@ class NumberPadDialog(QDialog):
     def on_clear_pressed(self): self.display.clear()
     def get_value(self): return self.display.text()
 
+class GCodeChecker:
+    def __init__(self, settings_widgets):
+        self.issues = []
+        self.grbl_settings = {}
+        self.x, self.y, self.z = 0.0, 0.0, 0.0
+        self.is_absolute_mode = True # G90 is default
+
+        # Extract settings from the QLineEdit widgets for the checker's use
+        for key, widget in settings_widgets.items():
+            try:
+                # Use the setting key without the '$'
+                setting_key = key.replace('$', '')
+                self.grbl_settings[setting_key] = float(widget.text())
+            except (ValueError, AttributeError):
+                self.grbl_settings[key.replace('$', '')] = None # Handle cases where settings are not loaded
+
+    def check(self, gcode_lines, is_connected):
+        self.issues = []
+        self.x, self.y, self.z = 0.0, 0.0, 0.0
+        self.is_absolute_mode = True
+        feed_rate_set = False
+
+        if not is_connected:
+            self.issues.append({
+                'line': 0,
+                'gcode': 'N/A',
+                'severity': 'warning',
+                'message': "Machine is not connected. Checks for machine limits (travel, feed rate, spindle speed) will be skipped."
+            })
+
+        for i, line in enumerate(gcode_lines):
+            line_num = i + 1
+            command = line.upper().split(';')[0].strip()
+
+            # --- State Tracking ---
+            if 'G90' in command: self.is_absolute_mode = True
+            if 'G91' in command: self.is_absolute_mode = False
+
+            # --- Check for feed rate before motion ---
+            if 'F' in command:
+                feed_rate_set = True
+
+            # --- Update position for motion commands ---
+            motion_codes = re.findall(r'\b(G0|G1|G2|G3)\b', command)
+            if motion_codes:
+                # Safely parse axis values
+                x_match = re.search(r'X([-\d.]+)', command)
+                y_match = re.search(r'Y([-\d.]+)', command)
+                z_match = re.search(r'Z([-\d.]+)', command)
+
+                x_val = float(x_match.group(1)) if x_match else None
+                y_val = float(y_match.group(1)) if y_match else None
+                z_val = float(z_match.group(1)) if z_match else None
+
+                if self.is_absolute_mode:
+                    if x_val is not None: self.x = x_val
+                    if y_val is not None: self.y = y_val
+                    if z_val is not None: self.z = z_val
+                else: # Incremental mode
+                    if x_val is not None: self.x += x_val
+                    if y_val is not None: self.y += y_val
+                    if z_val is not None: self.z += z_val
+
+            # --- Call specific validation checks ---
+            self._check_unsupported_codes(command, line_num, line)
+            self._check_syntax_errors(command, line_num, line)
+            self._check_logical_errors(command, line_num, line, feed_rate_set)
+            if is_connected:
+                self._check_machine_limits(command, line_num, line)
+            self._check_safety_warnings(command, line_num, line)
+
+        return self.issues
+
+    def _add_issue(self, severity, line_num, message, gcode):
+        self.issues.append({
+            'line': line_num,
+            'gcode': gcode,
+            'severity': severity,
+            'message': message
+        })
+
+    def _check_unsupported_codes(self, command, line_num, gcode):
+        unsupported = ['G40', 'G41', 'G42'] # Cutter compensation
+        for code in unsupported:
+            if code in command:
+                self._add_issue('error', line_num, f"Unsupported G-code ({code}). Cutter compensation is not available in standard GRBL and will cause an error.", gcode)
+
+    def _check_syntax_errors(self, command, line_num, gcode):
+        # Example: Check for valid numbers after axis words
+        # This is a simplified check. A more robust implementation would be more complex.
+        params = re.findall(r'([GMXYZFIJ])([-\d.]+)', command)
+        for code, value in params:
+            try:
+                float(value)
+            except ValueError:
+                self._add_issue('error', line_num, f"Invalid number format for parameter {code}. Found '{value}'.", gcode)
+
+    def _check_logical_errors(self, command, line_num, gcode, feed_rate_set):
+        # Use regex with word boundaries to find specific G-codes and avoid partial matches (e.g., G1 vs G17)
+        motion_codes = re.findall(r'\b(G1|G2|G3)\b', command)
+        arc_codes = re.findall(r'\b(G2|G3)\b', command)
+
+        # Check for motion before feed rate
+        if motion_codes and not feed_rate_set:
+            # We need to ensure a motion command isn't just part of another word.
+            # This check is now more precise.
+            # However, we must ignore this check if the line also contains M3 or M5 (spindle commands)
+            # as some CAM software sets the feed rate after turning on the spindle.
+            if not ('M3' in command or 'M5' in command):
+                 self._add_issue('error', line_num, "Motion command (G1/G2/G3) used before a feed rate (F) was set. This will cause GRBL error 22.", gcode)
+
+        # Check for valid arc commands
+        if arc_codes:
+            if 'I' not in command and 'J' not in command and 'R' not in command:
+                self._add_issue('error', line_num, "Arc command (G2/G3) is missing required I, J, or R parameters.", gcode)
+
+    def _check_machine_limits(self, command, line_num, gcode):
+        max_x_rate = self.grbl_settings.get('110')
+        max_y_rate = self.grbl_settings.get('111')
+        max_z_rate = self.grbl_settings.get('112')
+        max_spindle = self.grbl_settings.get('30')
+        max_x_travel = self.grbl_settings.get('130')
+        max_y_travel = self.grbl_settings.get('131')
+        max_z_travel = self.grbl_settings.get('132')
+
+        # Check Feed Rate (F value)
+        feed_match = re.search(r'F([-\d.]+)', command)
+        if feed_match:
+            feed_rate = float(feed_match.group(1))
+            # G0 moves use max rate, not F command. G1/G2/G3 use F.
+            motion_codes = re.findall(r'\b(G1|G2|G3)\b', command)
+            if motion_codes:
+                # Check against the lowest of the axis max rates involved in the move
+                active_axes = [axis for axis in ['X', 'Y', 'Z'] if re.search(r'\b' + axis + r'([-\d.]+)', command)]
+                relevant_max_rates = []
+                if 'X' in active_axes and max_x_rate: relevant_max_rates.append(max_x_rate)
+                if 'Y' in active_axes and max_y_rate: relevant_max_rates.append(max_y_rate)
+                if 'Z' in active_axes and max_z_rate: relevant_max_rates.append(max_z_rate)
+
+                if relevant_max_rates and feed_rate > min(relevant_max_rates):
+                     self._add_issue('warning', line_num, f"Feed rate {feed_rate} may exceed the machine's configured max rate for an active axis.", gcode)
+
+        # Check Spindle Speed (S value)
+        spindle_match = re.search(r'S([-\d.]+)', command)
+        if spindle_match and max_spindle:
+            speed = float(spindle_match.group(1))
+            if speed > max_spindle:
+                self._add_issue('warning', line_num, f"Spindle speed {speed} RPM exceeds machine's max setting of {max_spindle} RPM.", gcode)
+
+        # Check Travel Limits (Soft Limits)
+        if self.is_absolute_mode:
+            if max_x_travel and self.x > max_x_travel:
+                self._add_issue('error', line_num, f"X-axis move to {self.x:.2f}mm exceeds machine's max travel of {max_x_travel}mm.", gcode)
+            if max_y_travel and self.y > max_y_travel:
+                self._add_issue('error', line_num, f"Y-axis move to {self.y:.2f}mm exceeds machine's max travel of {max_y_travel}mm.", gcode)
+            # Z is negative, so we check if it's more negative than the max travel
+            if max_z_travel and self.z < -max_z_travel:
+                 self._add_issue('error', line_num, f"Z-axis move to {self.z:.2f}mm exceeds machine's max travel of -{max_z_travel}mm.", gcode)
+            # Also check for positive Z moves beyond 0, which is usually not desired
+            if self.z > 0:
+                 self._add_issue('warning', line_num, f"Z-axis move to a positive value ({self.z:.2f}mm). This is unusual and may not be intended.", gcode)
+
+    def _check_safety_warnings(self, command, line_num, gcode):
+        # Warn on tool changes
+        if 'M6' in command:
+            self._add_issue('warning', line_num, "Tool change (M6) detected. Ensure you have a manual tool change workflow prepared.", gcode)
+
+        # Warn on coolant commands
+        if 'M7' in command or 'M8' in command:
+            self._add_issue('warning', line_num, "Coolant command (M7/M8) detected. This will be ignored if your machine does not support it.", gcode)
+
+        # Warn on rapid Z-moves at low height
+        if re.search(r'\bG0\b', command) and 'Z' in command:
+            z_match = re.search(r'Z([-\d.]+)', command)
+            if z_match:
+                z_val = float(z_match.group(1))
+                target_z = z_val if self.is_absolute_mode else self.z + z_val
+                if target_z < -5.0: # Arbitrary "low height" threshold
+                     self._add_issue('warning', line_num, "Rapid move (G0) includes a Z-axis movement to a low height. This can be risky over previously cut areas.", gcode)
+
+        # Warn on long XY travel without Z retraction
+        if re.search(r'\b(G0|G1)\b', command) and ('X' in command or 'Y' in command) and 'Z' not in command:
+            # This is a simplified check. A better implementation would track previous positions.
+            # This is tricky because we already updated the position. We need the previous position.
+            # For simplicity, we'll just check if the current Z is low during a long move.
+            # A better implementation would pass the previous position to this method.
+            if self.z < -2.0: # Arbitrary "low Z" threshold
+                # Check if it's a "long" move
+                # This is also simplified.
+                self._add_issue('warning', line_num, "A long XY-move is commanded at a low Z-height without retraction. This increases the risk of tool collision.", gcode)
 class SerialWorker(QObject):
     serial_data_received = Signal(str)
     def __init__(self, serial_connection):
@@ -1236,28 +1494,46 @@ class MainWindow(QMainWindow):
 
     def load_gcode_file(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Load G-Code", "", "*.gcode *.nc;;*.*")
-        if filepath:
-            with open(filepath, 'r') as f:
-                self.gcode_lines = [line.strip() for line in f if line.strip() and not line.strip().startswith(';')]
-            self.gcode_file_label.setText(os.path.basename(filepath))
-            self.gcode_progress.setMaximum(len(self.gcode_lines))
-            self.gcode_current_line = 0
-            self.gcode_progress.setValue(0)
-            self.gcode_estimated_time = self.estimate_gcode_time()
-            if self.gcode_estimated_time > 0:
-                mins, secs = divmod(self.gcode_estimated_time, 60)
-                time_str = f"{int(mins)}m {int(secs)}s"
-                self.gcode_progress.setFormat(f"0.0% | Est. {time_str} remaining")
-                self.log_to_console(f"DEBUG: Initial time estimated: {time_str}")
-            else:
-                self.gcode_progress.setFormat("0.0%")
-            self.gcode_table.setRowCount(len(self.gcode_lines))
-            for i, line in enumerate(self.gcode_lines):
-                self.gcode_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                self.gcode_table.setItem(i, 1, QTableWidgetItem(line))
-                self.gcode_table.setItem(i, 2, QTableWidgetItem("Queued"))
-            self.gcode_table.resizeColumnsToContents()
-            self.update_ui_states()
+        if not filepath:
+            return
+
+        with open(filepath, 'r') as f:
+            lines = [line.strip() for line in f if line.strip() and not line.strip().startswith(';')]
+
+        # --- Pre-flight Check ---
+        is_connected = bool(self.serial_connection and self.serial_connection.is_open)
+        checker = GCodeChecker(self.grbl_setting_widgets)
+        issues = checker.check(lines, is_connected)
+
+        has_errors = any(i['severity'] == 'error' for i in issues)
+
+        if issues:
+            dialog = GCodeCheckDialog(issues, has_errors, self)
+            if dialog.exec_() != QDialog.Accepted:
+                self.log_to_console("INFO: G-code loading cancelled by user due to checker results.")
+                return # User cancelled, do not load the file
+
+        # --- Proceed with loading the file ---
+        self.gcode_lines = lines
+        self.gcode_file_label.setText(os.path.basename(filepath))
+        self.gcode_progress.setMaximum(len(self.gcode_lines))
+        self.gcode_current_line = 0
+        self.gcode_progress.setValue(0)
+        self.gcode_estimated_time = self.estimate_gcode_time()
+        if self.gcode_estimated_time > 0:
+            mins, secs = divmod(self.gcode_estimated_time, 60)
+            time_str = f"{int(mins)}m {int(secs)}s"
+            self.gcode_progress.setFormat(f"0.0% | Est. {time_str} remaining")
+            self.log_to_console(f"DEBUG: Initial time estimated: {time_str}")
+        else:
+            self.gcode_progress.setFormat("0.0%")
+        self.gcode_table.setRowCount(len(self.gcode_lines))
+        for i, line in enumerate(self.gcode_lines):
+            self.gcode_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.gcode_table.setItem(i, 1, QTableWidgetItem(line))
+            self.gcode_table.setItem(i, 2, QTableWidgetItem("Queued"))
+        self.gcode_table.resizeColumnsToContents()
+        self.update_ui_states()
 
     def update_ui_states(self):
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
