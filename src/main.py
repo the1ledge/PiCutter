@@ -117,6 +117,7 @@ QTimer.singleShot(80, _load_real_logo)
 import serial.tools.list_ports
 import re
 import time
+import datetime
 import cv2
 import math
 import numpy as np
@@ -580,6 +581,13 @@ class MainWindow(QMainWindow):
         if self.splash:
             self.splash.showMessage("Initializing...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
             QApplication.processEvents()
+
+        # Prepare a timestamped log file
+        log_dir = os.path.join(os.path.expanduser("~"), ".pigrbl", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.log_file_path = os.path.join(log_dir, f"pigrbl_log_{timestamp}.txt")
+
         self.alarm_codes = {1:"Hard limit.",2:"Soft limit.",3:"Reset in motion.",4:"Probe fail (initial).",5:"Probe fail (no contact).",6:"Homing fail (reset).",7:"Homing fail (door).",8:"Homing fail (pull-off).",9:"Homing fail (no switch).",15:"Jog exceeds travel."}
         self.error_codes = {
             1: "Expected G-code word: The command is missing a required word (e.g., G1, M3).",
@@ -1163,12 +1171,30 @@ class MainWindow(QMainWindow):
         if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'): return
         if self.filter_pos_checkbox.isChecked() and message.startswith('RX: <') and 'MPos:' in message: return
 
-        log_message = message
-        if message.startswith("DEBUG:"):
-            log_message = f"# {message}"
+        # Write to the persistent log file first
+        try:
+            with open(self.log_file_path, "a") as f:
+                f.write(message + '\n')
+        except Exception as e:
+            # If logging fails, print a message to the console to alert the user.
+            self.console_output.insertPlainText(f"CRITICAL: Could not write to log file: {e}\n")
 
-        self.console_output.moveCursor(QTextCursor.Start)
-        self.console_output.insertPlainText(log_message + '\n')
+        # Now, update the on-screen console, prepending the new message
+        self.console_output.insertPlainText(message + '\n')
+
+        # Trim the console display to 500 lines using an efficient method
+        # that avoids iterating and removing single lines which is very slow.
+        doc = self.console_output.document()
+        if doc.blockCount() > 500:
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.Start)
+            # Move down 500 lines
+            cursor.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, 500)
+            # Select everything from that point to the end of the document
+            cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            # Ensure the cursor is at the top to see the latest message
+            self.console_output.moveCursor(QTextCursor.Start)
 
     def handle_serial_data(self, data):
         self.log_to_console(f"RX: {data}")
@@ -1227,7 +1253,7 @@ class MainWindow(QMainWindow):
                 self.gcode_line_executed.emit(self.gcode_current_line - 1)
                 self.send_next_gcode_line()
         elif data.startswith("error:"):
-            self.log_to_console(f"DEBUG: Received '{data}', clearing command_pending.")
+            # self.log_to_console(f"DEBUG: Received '{data}', clearing command_pending.")
             self.command_pending = False
 
             # If a G-code job was running, HALT THE MACHINE IMMEDIATELY.
@@ -1524,7 +1550,7 @@ class MainWindow(QMainWindow):
             mins, secs = divmod(self.gcode_estimated_time, 60)
             time_str = f"{int(mins)}m {int(secs)}s"
             self.gcode_progress.setFormat(f"0.0% | Est. {time_str} remaining")
-            self.log_to_console(f"DEBUG: Initial time estimated: {time_str}")
+            # self.log_to_console(f"DEBUG: Initial time estimated: {time_str}")
         else:
             self.gcode_progress.setFormat("0.0%")
         self.gcode_table.setRowCount(len(self.gcode_lines))
@@ -1615,7 +1641,7 @@ class MainWindow(QMainWindow):
             max_x=float(self.grbl_setting_widgets["$110"].text()); max_y=float(self.grbl_setting_widgets["$111"].text()); max_z=float(self.grbl_setting_widgets["$112"].text()); src="GRBL"
         except (KeyError, ValueError):
             max_x,max_y,max_z=5000,5000,1000; src="Defaults"
-        self.log_to_console(f"DEBUG: Estimating time with Max Rates (X,Y,Z): {max_x}, {max_y}, {max_z} from {src}")
+        # self.log_to_console(f"DEBUG: Estimating time with Max Rates (X,Y,Z): {max_x}, {max_y}, {max_z} from {src}")
         x,y,z,feed,total_time=0,0,0,1000,0; is_abs=True; self.gcode_line_times=[]
         for line in self.gcode_lines:
             line_time = 0; cmd = line.upper().split(';')[0]
@@ -1669,7 +1695,7 @@ class MainWindow(QMainWindow):
                 if (len(cmd) + 1) >= self.rx_buffer_bytes:
                     return
 
-                self.log_to_console(f"DEBUG: Sending L:{self.gcode_current_line + 1}/{len(self.gcode_lines)} -> {cmd} (Bf:{self.planner_buffer_blocks},{self.rx_buffer_bytes})")
+                # self.log_to_console(f"DEBUG: Sending L:{self.gcode_current_line + 1}/{len(self.gcode_lines)} -> {cmd} (Bf:{self.planner_buffer_blocks},{self.rx_buffer_bytes})")
                 if self.send_command(cmd):
                     self.gcode_line_sent.emit(self.gcode_current_line)
                     self.gcode_current_line += 1
@@ -1691,7 +1717,7 @@ class MainWindow(QMainWindow):
             return False
 
         if self.command_pending and command not in ['?', '!', '~', '\x18']:
-            self.log_to_console(f"DEBUG: Command '{command}' blocked, command_pending is True.")
+            # self.log_to_console(f"DEBUG: Command '{command}' blocked, command_pending is True.")
             return False
 
         self.log_to_console(f"TX: {command}")
@@ -1699,7 +1725,7 @@ class MainWindow(QMainWindow):
 
         if command not in ['?', '!', '~', '\x18']:
             self.command_pending = True
-            self.log_to_console(f"DEBUG: Set command_pending=True for '{command}'")
+            # self.log_to_console(f"DEBUG: Set command_pending=True for '{command}'")
 
         return True
 
