@@ -139,6 +139,10 @@ class CameraWorker(QThread):
     def run(self):
         try:
             from picamera2 import Picamera2
+            # Add a check to see if cameras are available
+            if not Picamera2.global_camera_info():
+                self.camera_error.emit("Error: No camera detected.")
+                return
             self.picam2 = Picamera2()
             config = self.picam2.create_preview_configuration(main={"format": "RGB888"})
             self.picam2.configure(config)
