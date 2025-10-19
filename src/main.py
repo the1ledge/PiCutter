@@ -3,9 +3,9 @@ import sys
 import os
 
 # Minimal Qt imports to create an early splash immediately
-from PySide2.QtCore import Qt, QTimer
-from PySide2.QtWidgets import QApplication, QSplashScreen
-from PySide2.QtGui import QPixmap, QPainter, QColor, QFont
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import QApplication, QSplashScreen
+from PyQt5.QtGui import QPixmap, QPainter, QColor, QFont
 
 # Create QApplication early so the splash can appear before heavier imports
 app = QApplication(sys.argv)
@@ -113,22 +113,22 @@ _splash_carve_timer.start()
 # Schedule loading the real logo shortly after the splash so it doesn't delay initial display
 QTimer.singleShot(80, _load_real_logo)
 
-# Now import heavier modules and the rest of the PySide2 widgets
+# Now import heavier modules and the rest of the PyQt5 widgets
 import serial.tools.list_ports
 import re
 import time
 import cv2
 import math
 import numpy as np
-from PySide2.QtWidgets import (
+from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSizePolicy
 )
-from PySide2.QtCore import QThread, QObject, Signal, QSettings, QEvent, Slot
-from PySide2.QtGui import QTextCursor, QImage
+from PyQt5.QtCore import QThread, QObject, pyqtSignal, QSettings, QEvent, pyqtSlot
+from PyQt5.QtGui import QTextCursor, QImage
 
 class CameraWorker(QThread):
-    frame_ready = Signal(QImage)
-    camera_error = Signal(str)
+    frame_ready = pyqtSignal(QImage)
+    camera_error = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -553,7 +553,7 @@ class GCodeChecker:
                 # This is also simplified.
                 self._add_issue('warning', line_num, "A long XY-move is commanded at a low Z-height without retraction. This increases the risk of tool collision.", gcode)
 class SerialWorker(QObject):
-    serial_data_received = Signal(str)
+    serial_data_received = pyqtSignal(str)
     def __init__(self, serial_connection):
         super().__init__()
         self.serial_connection = serial_connection
@@ -568,11 +568,11 @@ class SerialWorker(QObject):
     def stop(self): self._is_running = False
 
 class MainWindow(QMainWindow):
-    grbl_setting_received = Signal(str, str)
-    probe_status_changed = Signal(bool)
-    gcode_line_sent = Signal(int)
-    gcode_line_executed = Signal(int)
-    gcode_job_error = Signal(str)
+    grbl_setting_received = pyqtSignal(str, str)
+    probe_status_changed = pyqtSignal(bool)
+    gcode_line_sent = pyqtSignal(int)
+    gcode_line_executed = pyqtSignal(int)
+    gcode_job_error = pyqtSignal(str)
 
     def __init__(self, splash=None):
         super().__init__()
@@ -1123,7 +1123,7 @@ class MainWindow(QMainWindow):
         self._splash_timeout_timer.timeout.connect(finish_no_conn)
         self._splash_timeout_timer.start(timeout_ms)
 
-    @Slot(QImage)
+    @pyqtSlot(QImage)
     def update_camera_feed(self, image):
         if image.isNull():
             return
@@ -1137,7 +1137,7 @@ class MainWindow(QMainWindow):
             h = max(1, min(self.gcode_video_label.height(), self.gcode_video_label.maximumHeight()))
             self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-    @Slot(str)
+    @pyqtSlot(str)
     def handle_camera_error(self, error_message):
         self.log_to_console(f"CAMERA_ERROR: {error_message}")
         self.video_label.setText(f"{error_message}\n\nIs camera connected?\nIs libcamera running?")
