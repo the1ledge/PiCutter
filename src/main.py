@@ -1,4 +1,4 @@
-# v0.17.0
+# v0.17.1
 import sys
 import os
 
@@ -23,7 +23,7 @@ _font.setPointSize(16)
 _font.setBold(True)
 _tmp_p.setFont(_font)
 _tmp_p.setPen(QColor('white'))
-_tmp_p.drawText(splash_base_pix.rect(), Qt.AlignCenter, "PiGRBL CNC Controller\nLoading...")
+_tmp_p.drawText(splash_base_pix.rect(), Qt.AlignCenter, "PiCutter\nLoading...")
 _tmp_p.end()
 
 # Defer heavy logo load/scale to a short single-shot timer so the splash shows immediately
@@ -656,17 +656,40 @@ class MainWindow(QMainWindow):
             "$132": {"label": "Z-axis max travel (mm)", "tooltip": "Maximum travel for the Z-axis. Used for soft limits."}
         }
 
-        self.setWindowTitle("PiGRBL CNC Controller")
+        self.setWindowTitle("PiCutter")
         self.resize(800, 480)
+        self.setFixedSize(800, 480)
         QApplication.setStyle("Fusion")
-        QApplication.instance().setStyleSheet("QToolTip { color: #000000; background-color: #ffffff; border: 1px solid black; }")
+
+        stylesheet = """
+            QPushButton#emergencyStop {
+                background-color: red;
+                color: white;
+                font-weight: bold;
+                font-size: 8pt;
+            }
+            QPushButton#homeButton {
+                font-size: 8pt;
+            }
+            QPushButton#autoZeroZButton,
+            QPushButton#threeAxisAutoZeroButton {
+                font-size: 7pt;
+            }
+            QToolTip {
+                color: #000000;
+                background-color: #ffffff;
+                border: 1px solid black;
+            }
+        """
+        self.setStyleSheet(stylesheet)
+
         self.settings = QSettings("MyCompany", "PiGRBLCNC")
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         top_bar_layout = QHBoxLayout()
         self.e_stop_button = QPushButton("EMERGENCY STOP\n(Reset)")
-        self.e_stop_button.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self.e_stop_button.setObjectName("emergencyStop")
         self.e_stop_button.setFixedHeight(40)
         top_bar_layout.addWidget(self.e_stop_button)
         self.unlock_button = QPushButton("Unlock ($X)")
@@ -813,8 +836,8 @@ class MainWindow(QMainWindow):
         wpos_dro_layout.addRow("Z:", self.wpos_z_label)
         wpos_dro_group.setLayout(wpos_dro_layout)
         middle_column_layout.addWidget(wpos_dro_group)
-        self.set_location_button.setFixedHeight(60)
-        self.go_to_location_button.setFixedHeight(60)
+        self.set_location_button.setMinimumHeight(48)
+        self.go_to_location_button.setMinimumHeight(48)
         middle_column_layout.addWidget(self.set_location_button)
         middle_column_layout.addWidget(self.go_to_location_button)
         middle_column_layout.addStretch(1)
@@ -822,9 +845,9 @@ class MainWindow(QMainWindow):
         right_column_layout = QVBoxLayout()
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
-        jog_layout.setSpacing(0)
+        jog_layout.setSpacing(10)
         jog_group.setLayout(jog_layout)
-        jog_group.layout().setContentsMargins(10, 10, 10, 10)
+        jog_group.layout().setContentsMargins(5, 5, 5, 5)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         self.step_size_combo.setMinimumWidth(40)
@@ -854,12 +877,16 @@ class MainWindow(QMainWindow):
         jog_layout.setRowStretch(0, 1)
         right_column_layout.addWidget(jog_group)
         actions_group = QGroupBox()
+        actions_group.setObjectName("actionsGroup")
         actions_layout = QGridLayout()
+        actions_layout.setSpacing(10)
         actions_group.setLayout(actions_layout)
+        self.home_button.setObjectName("homeButton")
+        self.run_probe_button.setObjectName("autoZeroZButton")
+        self.run_3axis_probe_button.setObjectName("threeAxisAutoZeroButton")
         action_buttons = [self.home_button, self.run_probe_button, self.run_3axis_probe_button]
         for button in action_buttons:
             button.setMinimumSize(60, 60)
-            button.setMaximumSize(80, 80)
         actions_layout.addWidget(self.home_button, 0, 0)
         actions_layout.addWidget(self.run_probe_button, 0, 1)
         actions_layout.addWidget(self.run_3axis_probe_button, 0, 2)
@@ -1803,6 +1830,8 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     # Reuse the early-created QApplication and splash shown at module import time.
     window = MainWindow(splash)
+
     # Let the window attempt auto-connect while the splash is visible
     window.run_auto_connect_with_splash(splash, timeout_ms=3000)
+
     sys.exit(app.exec_())
