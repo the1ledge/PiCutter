@@ -798,8 +798,13 @@ class MainWindow(QMainWindow):
         spindle_group = QGroupBox()
         spindle_layout = QFormLayout()
         self.spindle_speed_input = QLineEdit("1000")
+        self.spindle_speed_input.setMaximumWidth(100)
         self.numpad_enabled_fields.append(self.spindle_speed_input)
         self.spindle_speed_input.installEventFilter(self)
+        self.spindle_off_button.setMinimumWidth(150)
+        self.spindle_off_button.setMaximumWidth(150)
+        self.spindle_on_button.setMinimumWidth(150)
+        self.spindle_on_button.setMaximumWidth(150)
         spindle_layout.addRow("Spindle Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
         spindle_group.setLayout(spindle_layout)
@@ -1107,11 +1112,11 @@ class MainWindow(QMainWindow):
         If a connection is established before timeout_ms, show the UI immediately.
         Otherwise, show the UI after timeout_ms and allow manual connect.
         """
-        splash.showMessage("Attempting auto-connect...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+        splash.showMessage("Attempting auto-connect...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
         QApplication.processEvents()
 
         def finish_no_conn():
-            splash.showMessage("Auto-connect timed out. Starting UI...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            splash.showMessage("Auto-connect timed out. Starting UI...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
             QTimer.singleShot(200, lambda: _request_finish_after_reveal(self))
 
@@ -1119,7 +1124,7 @@ class MainWindow(QMainWindow):
             try:
                 # Refresh port list first
                 self.populate_ports()
-                splash.showMessage("Scanning serial ports...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+                splash.showMessage("Scanning serial ports...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
                 QApplication.processEvents()
 
                 connected = False
@@ -1134,7 +1139,7 @@ class MainWindow(QMainWindow):
                     connected = False
 
                 if connected:
-                    splash.showMessage("Auto-connect succeeded.", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+                    splash.showMessage("Auto-connect succeeded.", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
                     QApplication.processEvents()
                     # show UI shortly after success (respect reveal hold)
                     QTimer.singleShot(200, lambda: _request_finish_after_reveal(self))
