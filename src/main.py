@@ -578,7 +578,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.splash = splash
         if self.splash:
-            self.splash.showMessage("Initializing...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            self.splash.showMessage("Initializing...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
         self.alarm_codes = {1:"Hard limit.",2:"Soft limit.",3:"Reset in motion.",4:"Probe fail (initial).",5:"Probe fail (no contact).",6:"Homing fail (reset).",7:"Homing fail (door).",8:"Homing fail (pull-off).",9:"Homing fail (no switch).",15:"Jog exceeds travel."}
         self.error_codes = {
@@ -713,14 +713,14 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.tabs)
         self.numpad_enabled_fields = []
         if self.splash:
-            self.splash.showMessage("Building UI components...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            self.splash.showMessage("Building UI components...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
         self.build_manual_control_tab()
         self.build_gcode_tab()
         self.build_console_tab()
         self.build_settings_tab()
         if self.splash:
-            self.splash.showMessage("Connecting signals...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            self.splash.showMessage("Connecting signals...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
         self.connect_signals()
         self.serial_connection = None
@@ -775,11 +775,11 @@ class MainWindow(QMainWindow):
         self.camera_thread = None
         self.camera_worker = None
         if self.splash:
-            self.splash.showMessage("Initializing camera...", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            self.splash.showMessage("Initializing camera...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
         self.start_camera()
         if self.splash:
-            self.splash.showMessage("Ready.", Qt.AlignBottom | Qt.AlignLeft, Qt.white)
+            self.splash.showMessage("Ready.", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
             time.sleep(1)
 
@@ -1011,6 +1011,8 @@ class MainWindow(QMainWindow):
         self.grbl_setting_widgets = {}
         grbl_group = QGroupBox("GRBL Settings")
         self.grbl_layout = QGridLayout()
+        self.grbl_layout.setColumnMinimumWidth(1, 70)
+        self.grbl_layout.setColumnMinimumWidth(3, 70)
         read_button = QPushButton("Read Settings From Machine")
         read_button.clicked.connect(lambda: self.send_command("$$"))
         self.grbl_layout.addWidget(read_button, 0, 0, 1, 4)
@@ -1196,6 +1198,14 @@ class MainWindow(QMainWindow):
 
         self.console_output.moveCursor(QTextCursor.Start)
         self.console_output.insertPlainText(log_message + '\n')
+
+        # Enforce a 500-line limit by removing the oldest lines (at the bottom) in a single operation
+        doc = self.console_output.document()
+        block_count = doc.blockCount()
+        if block_count > 500:
+            cursor = QTextCursor(doc.findBlockByNumber(500))
+            cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
 
     def handle_serial_data(self, data):
         self.log_to_console(f"RX: {data}")
@@ -1696,7 +1706,7 @@ class MainWindow(QMainWindow):
                 if (len(cmd) + 1) >= self.rx_buffer_bytes:
                     return
 
-                self.log_to_console(f"DEBUG: Sending L:{self.gcode_current_line + 1}/{len(self.gcode_lines)} -> {cmd} (Bf:{self.planner_buffer_blocks},{self.rx_buffer_bytes})")
+                # self.log_to_console(f"DEBUG: Sending L:{self.gcode_current_line + 1}/{len(self.gcode_lines)} -> {cmd} (Bf:{self.planner_buffer_blocks},{self.rx_buffer_bytes})")
                 if self.send_command(cmd):
                     self.gcode_line_sent.emit(self.gcode_current_line)
                     self.gcode_current_line += 1
@@ -1726,7 +1736,7 @@ class MainWindow(QMainWindow):
 
         if command not in ['?', '!', '~', '\x18']:
             self.command_pending = True
-            self.log_to_console(f"DEBUG: Set command_pending=True for '{command}'")
+            # self.log_to_console(f"DEBUG: Set command_pending=True for '{command}'")
 
         return True
 
