@@ -711,6 +711,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(top_bar_layout)
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
+        main_layout.setSpacing(2)
         self.numpad_enabled_fields = []
         if self.splash:
             self.splash.showMessage("Building UI components...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
@@ -794,6 +795,7 @@ class MainWindow(QMainWindow):
         self.go_to_location_button = QPushButton("Go To Location")
         self.spindle_on_button, self.spindle_off_button = QPushButton("On (M3)"), QPushButton("Off (M5)")
         left_column_layout = QVBoxLayout()
+        left_column_layout.setSpacing(2)
         left_column_layout.setAlignment(Qt.AlignTop)
         spindle_group = QGroupBox()
         spindle_layout = QFormLayout()
@@ -824,6 +826,7 @@ class MainWindow(QMainWindow):
         left_column_layout.addStretch(1)
         main_layout.addLayout(left_column_layout)
         middle_column_layout = QVBoxLayout()
+        middle_column_layout.setSpacing(2)
         middle_column_layout.setAlignment(Qt.AlignTop)
         dro_group = QGroupBox("Machine Pos")
         dro_layout = QFormLayout()
@@ -852,7 +855,7 @@ class MainWindow(QMainWindow):
         jog_layout = QGridLayout()
         jog_layout.setSpacing(10)
         jog_group.setLayout(jog_layout)
-        jog_group.layout().setContentsMargins(5, 5, 5, 5)
+        jog_group.layout().setContentsMargins(2, 2, 2, 2)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         self.step_size_combo.setMinimumWidth(40)
