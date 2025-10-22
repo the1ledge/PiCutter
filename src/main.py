@@ -752,6 +752,8 @@ class MainWindow(QMainWindow):
         self.probe_phase = None
         self.wco_x, self.wco_y, self.wco_z = 0.0, 0.0, 0.0
         self.mpos_x, self.mpos_y, self.mpos_z = 0.0, 0.0, 0.0
+        self.current_feed_rate = 0.0
+        self.feed_override_percent = 100
         self.grbl_settings_count = 0
         self.gcode_start_time = None
         self.gcode_estimated_time = 0
@@ -938,6 +940,24 @@ class MainWindow(QMainWindow):
         left_panel_layout.addWidget(self.gcode_table)
         video_group = QGroupBox()
         video_layout = QVBoxLayout()
+
+        # --- Feed Rate Override Controls ---
+        feed_rate_layout = QHBoxLayout()
+        self.feed_rate_decrease_button = QPushButton("-10%")
+        self.feed_rate_decrease_button.setMinimumSize(60, 60)
+        self.feed_rate_decrease_button.setObjectName("feedRateDecrease")
+        self.feed_rate_readout_label = QLabel("OVR: 100%\n(5000 mm/min)")
+        self.feed_rate_readout_label.setAlignment(Qt.AlignCenter)
+        self.feed_rate_readout_label.setObjectName("feedRateReadout")
+        self.feed_rate_increase_button = QPushButton("+10%")
+        self.feed_rate_increase_button.setMinimumSize(60, 60)
+        self.feed_rate_increase_button.setObjectName("feedRateIncrease")
+        feed_rate_layout.addWidget(self.feed_rate_decrease_button)
+        feed_rate_layout.addWidget(self.feed_rate_readout_label, 1) # Give label stretch factor
+        feed_rate_layout.addWidget(self.feed_rate_increase_button)
+        video_layout.addLayout(feed_rate_layout)
+        # --- End Feed Rate Controls ---
+
         self.gcode_video_label = QLabel("Initializing Camera...")
         self.gcode_video_label.setAlignment(Qt.AlignCenter)
         self.gcode_video_label.setStyleSheet("border: 1px solid black; background-color: #333; color: white;")
@@ -1062,6 +1082,32 @@ class MainWindow(QMainWindow):
         self.gcode_line_sent.connect(self.on_gcode_line_sent)
         self.gcode_line_executed.connect(self.on_gcode_line_executed)
         self.gcode_job_error.connect(self.on_gcode_job_error)
+        self.feed_rate_increase_button.clicked.connect(self.increase_feed_rate)
+        self.feed_rate_decrease_button.clicked.connect(self.decrease_feed_rate)
+
+    def increase_feed_rate(self):
+        # GRBL command for 10% feed rate increase
+        self.send_command("\x91")
+
+    def decrease_feed_rate(self):
+        # GRBL command for 10% feed rate decrease
+        self.send_command("\x92")
+
+    def update_feed_rate_display(self):
+        if self.gcode_is_running:
+            # During a job, show the live override percentage and calculated actual feed
+            actual_feed = self.current_feed_rate * (self.feed_override_percent / 100.0)
+            self.feed_rate_readout_label.setText(f"OVR: {self.feed_override_percent}%\n({actual_feed:.0f} mm/min)")
+        else:
+            # When idle, show 100% and the machine's max feed rate
+            try:
+                # Use the lowest of X or Y max rates as the representative speed
+                max_x_rate = float(self.grbl_setting_widgets["$110"].text())
+                max_y_rate = float(self.grbl_setting_widgets["$111"].text())
+                max_rate = min(max_x_rate, max_y_rate)
+            except (KeyError, ValueError):
+                max_rate = 5000 # Fallback default
+            self.feed_rate_readout_label.setText(f"OVR: 100%\n(Max: {max_rate:.0f})")
 
     def on_gcode_line_sent(self, line_index):
         if line_index >= 0:
@@ -1259,6 +1305,20 @@ class MainWindow(QMainWindow):
                 self.wpos_x_label.setText(f"{wpos_x:.3f}")
                 self.wpos_y_label.setText(f"{wpos_y:.3f}")
                 self.wpos_z_label.setText(f"{wpos_z:.3f}")
+
+            # --- Feed Rate Parsing ---
+            feed_match = re.search(r"FS:([\d.-]+),(\d+)", data)
+            if feed_match:
+                self.current_feed_rate = float(feed_match.group(1))
+                # The second value is spindle, which we don't need here.
+
+            override_match = re.search(r"Ov:(\d+),(\d+),(\d+)", data)
+            if override_match:
+                self.feed_override_percent = int(override_match.group(1))
+
+            if feed_match or override_match:
+                self.update_feed_rate_display()
+
         elif data.lower() == "ok":
             self.command_pending = False
             if self.is_advanced_probing:
@@ -1602,6 +1662,10 @@ class MainWindow(QMainWindow):
         for w in [self.e_stop_button, self.spindle_on_button, self.spindle_off_button, self.spindle_speed_input]:
             w.setEnabled(is_connected)
 
+        # Feed rate override buttons are only enabled during a job
+        self.feed_rate_increase_button.setEnabled(job_running)
+        self.feed_rate_decrease_button.setEnabled(job_running)
+
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
         self.home_pulse_timer.stop(); self.alarm_pulse_timer.stop()
         self.home_button.setStyleSheet(""); self.unlock_button.setStyleSheet(""); self.run_probe_button.setStyleSheet("")
@@ -1626,6 +1690,9 @@ class MainWindow(QMainWindow):
             self.run_probe_button.setText("Z Zeroed"); self.run_probe_button.setStyleSheet("background-color:darkgreen;color:white;font-weight:bold;"); self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
         else:
             self.run_probe_button.setText("Auto Zero Z"); self.run_3axis_probe_button.setText("3-Axis\nAuto Zero")
+
+        # Always update the feed rate display to reflect the current state (running or idle)
+        self.update_feed_rate_display()
 
     def start_gcode(self):
         if self.gcode_lines:
