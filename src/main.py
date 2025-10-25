@@ -572,6 +572,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, splash=None):
         super().__init__()
+        self.grbl_config_settings = {}
         self.splash = splash
         if self.splash:
             self.splash.showMessage("Initializing...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
@@ -922,7 +923,7 @@ class MainWindow(QMainWindow):
         gcode_actions_layout.addWidget(self.start_button)
         gcode_actions_layout.addWidget(self.pause_button)
         gcode_actions_layout.addWidget(self.stop_button)
-        self.check_mode_button = QPushButton("Check G-Code")
+        self.check_mode_button = QPushButton("Check Mode")
         self.check_mode_button.setCheckable(True)
         gcode_actions_layout.addWidget(self.check_mode_button)
         gcode_actions_layout.addStretch()
@@ -1052,7 +1053,10 @@ class MainWindow(QMainWindow):
         self.grbl_layout.setColumnMinimumWidth(3, 70)
         read_button = QPushButton("Read Settings From Machine")
         read_button.clicked.connect(lambda: self.send_command("$$"))
-        self.grbl_layout.addWidget(read_button, 0, 0, 1, 4)
+        save_to_file_button = QPushButton("Save to File")
+        save_to_file_button.clicked.connect(self.save_grbl_settings_to_file)
+        self.grbl_layout.addWidget(read_button, 0, 0, 1, 2)
+        self.grbl_layout.addWidget(save_to_file_button, 0, 2, 1, 2)
         grbl_group.setLayout(self.grbl_layout)
         layout.addWidget(left_column_widget, 1)
         layout.addWidget(grbl_group, 2)
@@ -1060,6 +1064,8 @@ class MainWindow(QMainWindow):
         save_button.clicked.connect(self.save_settings)
         tab_layout.addWidget(save_button)
         self.load_settings()
+        self.ensure_config_file_exists()
+        self.load_grbl_config_file()
 
     def connect_signals(self):
         self.refresh_button.clicked.connect(self.populate_ports)
@@ -1713,7 +1719,7 @@ class MainWindow(QMainWindow):
         if is_checking:
             if not self.check_mode_pulse_timer.isActive():
                 self.check_mode_pulse_timer.start()
-            self.start_button.setText("Check G-Code")
+            self.start_button.setText("Start Check")
         else:
             if self.check_mode_pulse_timer.isActive():
                 self.check_mode_pulse_timer.stop()
@@ -1860,6 +1866,7 @@ class MainWindow(QMainWindow):
         if not port: return
         try:
             self.serial_connection=serial.Serial(port,baud,timeout=1); time.sleep(2); self.serial_connection.write(b"\r\n\r\n"); self.serial_connection.flushInput(); self.serial_thread=QThread(); self.serial_worker=SerialWorker(self.serial_connection); self.serial_worker.moveToThread(self.serial_thread); self.serial_thread.started.connect(self.serial_worker.run); self.serial_worker.serial_data_received.connect(self.handle_serial_data); self.serial_thread.start(); self.dro_timer.start(); self.connect_button.setText("Disconnect"); self.update_connection_indicator(True)
+            self.send_command("$$")
         except (serial.SerialException, FileNotFoundError) as e:
             self.log_to_console(f"ERROR: Failed to connect - {e}"); self.update_connection_indicator(False)
         self.update_ui_states()
@@ -1900,16 +1907,137 @@ class MainWindow(QMainWindow):
         self.log_to_console("INFO: Settings saved.")
 
     def update_grbl_setting(self, setting, value):
-        self.initial_grbl_settings[setting]=value
-        if setting in self.grbl_setting_widgets: self.grbl_setting_widgets[setting].setText(value)
+        self.initial_grbl_settings[setting] = value
+        widget_to_update = None
+        if setting in self.grbl_setting_widgets:
+            widget_to_update = self.grbl_setting_widgets[setting]
+            widget_to_update.setText(value)
         else:
-            info=self.GRBL_SETTINGS_INFO.get(setting,{}); lbl_txt=f"{info.get('label',setting)}:"; tip_txt=info.get('tooltip',"No description.")
-            label=QLabel(lbl_txt); field=QLineEdit(value); field.setToolTip(tip_txt); field.installEventFilter(self)
-            row=(self.grbl_settings_count//2)+1; col=self.grbl_settings_count%2
-            self.grbl_layout.addWidget(label,row,col*2); self.grbl_layout.addWidget(field,row,col*2+1); self.grbl_setting_widgets[setting]=field; self.numpad_enabled_fields.append(field); self.grbl_settings_count+=1
+            info = self.GRBL_SETTINGS_INFO.get(setting, {})
+            lbl_txt = f"{info.get('label', setting)}:"
+            tip_txt = info.get('tooltip', "No description.")
+            label = QLabel(lbl_txt)
+            field = QLineEdit(value)
+            field.setToolTip(tip_txt)
+            field.installEventFilter(self)
+            # Connect the textChanged signal to the handler
+            field.textChanged.connect(lambda text, s=setting: self.on_grbl_setting_changed(s, text))
+            row = (self.grbl_settings_count // 2) + 1
+            col = self.grbl_settings_count % 2
+            self.grbl_layout.addWidget(label, row, col * 2)
+            self.grbl_layout.addWidget(field, row, col * 2 + 1)
+            self.grbl_setting_widgets[setting] = field
+            self.numpad_enabled_fields.append(field)
+            self.grbl_settings_count += 1
+            widget_to_update = field
+
+        # Compare with config file and highlight if necessary
+        if setting in self.grbl_config_settings:
+            config_value = self.grbl_config_settings[setting]
+            # Normalize to float for comparison to avoid string formatting issues
+            try:
+                if float(value) != float(config_value):
+                    widget_to_update.setStyleSheet("background-color: orange;")
+                else:
+                    widget_to_update.setStyleSheet("") # Reset to default
+            except (ValueError, TypeError):
+                # Fallback to string comparison if conversion fails
+                if value != config_value:
+                    widget_to_update.setStyleSheet("background-color: orange;")
+                else:
+                    widget_to_update.setStyleSheet("")
+        else:
+            widget_to_update.setStyleSheet("") # No corresponding config setting, so no highlight
 
     def get_settings_widgets(self): return {"probe/distance":self.probe_dist_input,"probe/feedrate":self.probe_feed_input,"probe/thickness":self.probe_thickness_input,"probe/slow_feedrate":self.slow_probe_feed_input,"probe/retract_dist":self.probe_retract_input,"probe/tool_radius":self.tool_radius_input}
     def get_grbl_fields(self): return self.grbl_setting_widgets
+
+    def save_grbl_settings_to_file(self):
+        config_file = os.path.join(os.path.dirname(__file__), "config", "GRBLCNC.config")
+        settings_to_save = {}
+        for key, widget in self.grbl_setting_widgets.items():
+            settings_to_save[key] = widget.text()
+
+        try:
+            with open(config_file, 'w') as f:
+                f.write("# GRBL Settings for PiCutter\n")
+                # Sort by key for consistency, treating the numeric part of the key as an integer
+                for key in sorted(settings_to_save.keys(), key=lambda k: int(k.replace('$', ''))):
+                    f.write(f"{key}={settings_to_save[key]}\n")
+            self.log_to_console("INFO: Saved GRBL settings to GRBLCNC.config")
+            # After saving, reload the config and re-check all settings to update highlighting
+            self.load_grbl_config_file()
+            for key, widget in self.grbl_setting_widgets.items():
+                self.update_grbl_setting(key, widget.text())
+
+        except IOError as e:
+            self.log_to_console(f"ERROR: Could not write to GRBLCNC.config: {e}")
+            QMessageBox.critical(self, "Error", f"Could not save settings to file:\n{e}")
+
+    def on_grbl_setting_changed(self, setting, current_text):
+        widget = self.grbl_setting_widgets.get(setting)
+        if not widget:
+            return
+
+        config_value = self.grbl_config_settings.get(setting)
+        if config_value is not None:
+            try:
+                # Compare as floats for robustness
+                if float(current_text) == float(config_value):
+                    widget.setStyleSheet("") # Reset style
+            except (ValueError, TypeError):
+                # Fallback to string comparison
+                if current_text == config_value:
+                    widget.setStyleSheet("")
+
+    def ensure_config_file_exists(self):
+        config_dir = os.path.join(os.path.dirname(__file__), "config")
+        config_file = os.path.join(config_dir, "GRBLCNC.config")
+
+        if not os.path.exists(config_dir):
+            try:
+                os.makedirs(config_dir)
+            except OSError as e:
+                self.log_to_console(f"ERROR: Could not create config directory: {e}")
+                return
+
+        if not os.path.exists(config_file):
+            DEFAULT_GRBL_SETTINGS = {
+                "$0": "10", "$1": "25", "$2": "0", "$3": "0", "$4": "0", "$5": "0", "$6": "0",
+                "$10": "1", "$11": "0.010", "$12": "0.002", "$13": "0",
+                "$20": "0", "$21": "0", "$22": "0", "$23": "0",
+                "$24": "25.000", "$25": "500.000", "$26": "250", "$27": "1.000",
+                "$30": "1000.000", "$31": "0.000", "$32": "0",
+                "$100": "250.000", "$101": "250.000", "$102": "250.000",
+                "$110": "5000.000", "$111": "5000.000", "$112": "1000.000",
+                "$120": "10.000", "$121": "10.000", "$122": "10.000",
+                "$130": "200.000", "$131": "200.000", "$132": "200.000"
+            }
+            try:
+                with open(config_file, 'w') as f:
+                    f.write("# Default GRBL Settings for PiCutter\n")
+                    for key, value in DEFAULT_GRBL_SETTINGS.items():
+                        f.write(f"{key}={value}\n")
+            except IOError as e:
+                self.log_to_console(f"ERROR: Could not write to config file: {e}")
+
+    def load_grbl_config_file(self):
+        config_file = os.path.join(os.path.dirname(__file__), "config", "GRBLCNC.config")
+        if not os.path.exists(config_file):
+            self.log_to_console("INFO: GRBLCNC.config not found. Using defaults.")
+            return
+
+        try:
+            with open(config_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('#') or '=' not in line:
+                        continue
+                    key, value = line.split('=', 1)
+                    self.grbl_config_settings[key.strip()] = value.strip()
+            self.log_to_console("INFO: Loaded settings from GRBLCNC.config")
+        except IOError as e:
+            self.log_to_console(f"ERROR: Could not read GRBLCNC.config: {e}")
 
     def show_number_pad(self, line_edit):
         dialog = NumberPadDialog(line_edit.text(), self)
