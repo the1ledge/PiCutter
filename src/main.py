@@ -520,10 +520,6 @@ class GCodeChecker:
             # Z is negative, so we check if it's more negative than the max travel
             if max_z_travel and self.z < -max_z_travel:
                  self._add_issue('error', line_num, f"Z-axis move to {self.z:.2f}mm exceeds machine's max travel of -{max_z_travel}mm.", gcode)
-            # Also check for positive Z moves beyond 0, which is usually not desired
-            if self.z > 0:
-                 self._add_issue('warning', line_num, f"Z-axis move to a positive value ({self.z:.2f}mm). This is unusual and may not be intended.", gcode)
-
     def _check_safety_warnings(self, command, line_num, gcode):
         # Warn on tool changes
         if 'M6' in command:
@@ -542,8 +538,8 @@ class GCodeChecker:
                 if target_z < -5.0: # Arbitrary "low height" threshold
                      self._add_issue('warning', line_num, "Rapid move (G0) includes a Z-axis movement to a low height. This can be risky over previously cut areas.", gcode)
 
-        # Warn on long XY travel without Z retraction
-        if re.search(r'\b(G0|G1)\b', command) and ('X' in command or 'Y' in command) and 'Z' not in command:
+        # Warn on long rapid XY travel without Z retraction
+        if re.search(r'\bG0\b', command) and ('X' in command or 'Y' in command) and 'Z' not in command:
             # This is a simplified check. A better implementation would track previous positions.
             # This is tricky because we already updated the position. We need the previous position.
             # For simplicity, we'll just check if the current Z is low during a long move.
@@ -551,7 +547,7 @@ class GCodeChecker:
             if self.z < -2.0: # Arbitrary "low Z" threshold
                 # Check if it's a "long" move
                 # This is also simplified.
-                self._add_issue('warning', line_num, "A long XY-move is commanded at a low Z-height without retraction. This increases the risk of tool collision.", gcode)
+                self._add_issue('warning', line_num, "A long rapid XY-move (G0) is commanded at a low Z-height without retraction. This increases the risk of tool collision.", gcode)
 class SerialWorker(QObject):
     serial_data_received = pyqtSignal(str)
     def __init__(self, serial_connection):
