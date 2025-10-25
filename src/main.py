@@ -768,6 +768,10 @@ class MainWindow(QMainWindow):
         self.alarm_pulse_timer.setInterval(500)
         self.alarm_pulse_timer.timeout.connect(self.pulse_alarm_button)
         self.alarm_pulse_state = 0
+        self.check_mode_pulse_timer = QTimer(self)
+        self.check_mode_pulse_timer.setInterval(500)
+        self.check_mode_pulse_timer.timeout.connect(self.pulse_check_mode_button)
+        self.check_mode_pulse_state = 0
         self.populate_ports()
         self.update_connection_indicator(False)
         self.update_ui_states()
@@ -918,8 +922,9 @@ class MainWindow(QMainWindow):
         gcode_actions_layout.addWidget(self.start_button)
         gcode_actions_layout.addWidget(self.pause_button)
         gcode_actions_layout.addWidget(self.stop_button)
-        self.park_on_finish_checkbox = QCheckBox("Park on Finish")
-        gcode_actions_layout.addWidget(self.park_on_finish_checkbox)
+        self.check_mode_button = QPushButton("Check G-Code")
+        self.check_mode_button.setCheckable(True)
+        gcode_actions_layout.addWidget(self.check_mode_button)
         gcode_actions_layout.addStretch()
         gcode_group_layout.addLayout(gcode_file_layout)
         gcode_group_layout.addLayout(gcode_actions_layout)
@@ -1026,6 +1031,14 @@ class MainWindow(QMainWindow):
         probe_layout.addRow("Tool Radius (mm):", self.tool_radius_input)
         probe_group.setLayout(probe_layout)
         left_column_layout.addWidget(probe_group)
+
+        gcode_settings_group = QGroupBox("G-Code Settings")
+        gcode_settings_layout = QFormLayout()
+        self.park_on_finish_checkbox = QCheckBox("Park on Finish")
+        gcode_settings_layout.addRow(self.park_on_finish_checkbox)
+        gcode_settings_group.setLayout(gcode_settings_layout)
+        left_column_layout.addWidget(gcode_settings_group)
+
         probe_fields = [self.probe_dist_input, self.probe_feed_input, self.slow_probe_feed_input, self.probe_retract_input, self.probe_thickness_input, self.tool_radius_input]
         self.numpad_enabled_fields.extend(probe_fields)
         for field in probe_fields:
@@ -1080,6 +1093,7 @@ class MainWindow(QMainWindow):
         self.gcode_job_error.connect(self.on_gcode_job_error)
         self.feed_rate_increase_button.clicked.connect(self.increase_feed_rate)
         self.feed_rate_decrease_button.clicked.connect(self.decrease_feed_rate)
+        self.check_mode_button.clicked.connect(self.toggle_check_mode)
 
     def increase_feed_rate(self):
         # GRBL command for 10% feed rate increase
@@ -1088,6 +1102,9 @@ class MainWindow(QMainWindow):
     def decrease_feed_rate(self):
         # GRBL command for 10% feed rate decrease
         self.send_command("\x92")
+
+    def toggle_check_mode(self):
+        self.send_command("$C")
 
     def update_feed_rate_display(self):
         if self.gcode_is_running:
@@ -1663,7 +1680,7 @@ class MainWindow(QMainWindow):
         self.feed_rate_decrease_button.setEnabled(job_running)
 
         self.pause_button.setText("Resume" if self.gcode_is_paused else "Pause")
-        self.home_pulse_timer.stop(); self.alarm_pulse_timer.stop()
+        self.home_pulse_timer.stop(); self.alarm_pulse_timer.stop(); self.check_mode_pulse_timer.stop()
         self.home_button.setStyleSheet(""); self.unlock_button.setStyleSheet(""); self.run_probe_button.setStyleSheet("")
         if not is_connected: self.is_homed = self.is_manually_zeroed = False
         if self.machine_state == "Home": self.home_pulse_timer.start()
@@ -1689,6 +1706,19 @@ class MainWindow(QMainWindow):
 
         # Always update the feed rate display to reflect the current state (running or idle)
         self.update_feed_rate_display()
+
+        # Update check mode button and start button text
+        is_checking = self.machine_state == "Check"
+        self.check_mode_button.setChecked(is_checking)
+        if is_checking:
+            if not self.check_mode_pulse_timer.isActive():
+                self.check_mode_pulse_timer.start()
+            self.start_button.setText("Check G-Code")
+        else:
+            if self.check_mode_pulse_timer.isActive():
+                self.check_mode_pulse_timer.stop()
+            self.check_mode_button.setStyleSheet("")
+            self.start_button.setText("Start")
 
     def start_gcode(self):
         if self.gcode_lines:
@@ -1846,6 +1876,10 @@ class MainWindow(QMainWindow):
 
     def pulse_alarm_button(self):
         self.unlock_button.setText(f"ALARM: {self.alarm_codes.get(self.current_alarm_code, 'UNLOCK')}"); self.alarm_pulse_state=1-self.alarm_pulse_state; self.unlock_button.setStyleSheet(f"background-color: {'#F44336' if self.alarm_pulse_state==0 else '#FF7043'}; color: white; font-weight: bold;")
+
+    def pulse_check_mode_button(self):
+        self.check_mode_pulse_state = 1 - self.check_mode_pulse_state
+        self.check_mode_button.setStyleSheet(f"background-color: {'yellow' if self.check_mode_pulse_state == 0 else 'lightyellow'};")
 
     def update_connection_indicator(self, is_connected):
         if is_connected:
