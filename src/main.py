@@ -1,4 +1,4 @@
-# v0.17.1
+# v0.18.0
 import sys
 import os
 
@@ -126,6 +126,43 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QThread, QObject, pyqtSignal, QSettings, QEvent, pyqtSlot
 from PyQt5.QtGui import QTextCursor, QImage
 
+class USBCameraWorker(QThread):
+    frame_ready = pyqtSignal(QImage)
+    camera_error = pyqtSignal(str)
+
+    def __init__(self, camera_index=0, parent=None):
+        super().__init__(parent)
+        self.camera_index = camera_index
+        self._is_running = True
+        self.cap = None
+
+    def run(self):
+        self.cap = cv2.VideoCapture(self.camera_index)
+        if not self.cap.isOpened():
+            self.camera_error.emit(f"Error: Could not open USB camera index {self.camera_index}.")
+            return
+
+        while self._is_running:
+            ret, frame = self.cap.read()
+            if not ret:
+                self.camera_error.emit("Error: Failed to capture frame from USB camera.")
+                break
+
+            # Convert the captured frame from BGR to RGB
+            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            self.frame_ready.emit(qt_image.copy())
+            time.sleep(1/60) # Limit frame rate
+
+        if self.cap:
+            self.cap.release()
+
+    def stop(self):
+        self._is_running = False
+        self.wait()
+
 class CameraWorker(QThread):
     frame_ready = pyqtSignal(QImage)
     camera_error = pyqtSignal(str)
@@ -155,7 +192,10 @@ class CameraWorker(QThread):
                 self.frame_ready.emit(qt_image.copy())
             time.sleep(1/60)
         if self.picam2:
-            self.picam2.stop()
+            # The close() method should handle stopping the camera activities.
+            # Calling stop() separately can cause race conditions with the
+            # internal listener thread in some environments, leading to a crash.
+            self.picam2.close()
 
     def stop(self):
         self._is_running = False
@@ -681,6 +721,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(stylesheet)
 
         self.settings = QSettings("MyCompany", "PiGRBLCNC")
+        self.camera_thread = None
+        self.camera_worker = None
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -774,10 +816,9 @@ class MainWindow(QMainWindow):
         self.check_mode_pulse_timer.timeout.connect(self.pulse_check_mode_button)
         self.check_mode_pulse_state = 0
         self.populate_ports()
+        self.populate_usb_cameras()
         self.update_connection_indicator(False)
         self.update_ui_states()
-        self.camera_thread = None
-        self.camera_worker = None
         if self.splash:
             self.splash.showMessage("Initializing camera...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
@@ -1044,6 +1085,17 @@ class MainWindow(QMainWindow):
         self.numpad_enabled_fields.extend(probe_fields)
         for field in probe_fields:
             field.installEventFilter(self)
+        camera_settings_group = QGroupBox("Camera Settings")
+        camera_settings_layout = QFormLayout()
+        self.camera_type_combo = QComboBox()
+        self.camera_type_combo.addItems(["PiCamera", "USB Camera"])
+        self.usb_camera_combo = QComboBox()
+        self.refresh_usb_cameras_button = QPushButton("Refresh List")
+        camera_settings_layout.addRow("Camera Type:", self.camera_type_combo)
+        camera_settings_layout.addRow("USB Camera:", self.usb_camera_combo)
+        camera_settings_layout.addRow(self.refresh_usb_cameras_button)
+        camera_settings_group.setLayout(camera_settings_layout)
+        left_column_layout.addWidget(camera_settings_group)
         left_column_layout.addStretch(1)
         self.initial_grbl_settings = {}
         self.grbl_setting_widgets = {}
@@ -1069,6 +1121,7 @@ class MainWindow(QMainWindow):
 
     def connect_signals(self):
         self.refresh_button.clicked.connect(self.populate_ports)
+        self.refresh_usb_cameras_button.clicked.connect(self.populate_usb_cameras)
         self.connect_button.clicked.connect(self.toggle_connection)
         self.x_plus_button.clicked.connect(lambda:self.send_jog_command("X",1,self.x_plus_button))
         self.x_minus_button.clicked.connect(lambda:self.send_jog_command("X",-1,self.x_minus_button))
@@ -1100,6 +1153,10 @@ class MainWindow(QMainWindow):
         self.feed_rate_increase_button.clicked.connect(self.increase_feed_rate)
         self.feed_rate_decrease_button.clicked.connect(self.decrease_feed_rate)
         self.check_mode_button.clicked.connect(self.toggle_check_mode)
+
+        # Restart camera when selection changes
+        self.camera_type_combo.currentIndexChanged.connect(self.start_camera)
+        self.usb_camera_combo.currentIndexChanged.connect(self.start_camera)
 
     def increase_feed_rate(self):
         # GRBL command for 10% feed rate increase
@@ -1242,12 +1299,34 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def handle_camera_error(self, error_message):
         self.log_to_console(f"CAMERA_ERROR: {error_message}")
-        self.video_label.setText(f"{error_message}\n\nIs camera connected?\nIs libcamera running?")
+        error_text = f"{error_message}\n\nIs the camera connected?"
+        self.video_label.setText(error_text)
+        self.gcode_video_label.setText(error_text)
 
     def start_camera(self):
-        if self.camera_thread and self.camera_thread.isRunning(): return
+        # Stop any existing camera thread before starting a new one.
+        if self.camera_thread and self.camera_thread.isRunning():
+            self.stop_camera()
+
+        camera_type = self.camera_type_combo.currentText()
         self.camera_thread = QThread(self)
-        self.camera_worker = CameraWorker()
+
+        # Instantiate the correct worker based on settings
+        if camera_type == "PiCamera":
+            self.camera_worker = CameraWorker()
+        else:  # USB Camera
+            try:
+                # E.g., "Camera 0" -> 0
+                device_str = self.usb_camera_combo.currentText()
+                if device_str and "Camera" in device_str:
+                    camera_index = int(device_str.split()[-1])
+                else: # Fallback if empty or invalid
+                    camera_index = 0
+                self.camera_worker = USBCameraWorker(camera_index=camera_index)
+            except (ValueError, IndexError):
+                self.handle_camera_error("Invalid USB camera selection. Falling back to index 0.")
+                self.camera_worker = USBCameraWorker(camera_index=0)
+
         self.camera_worker.moveToThread(self.camera_thread)
         self.camera_thread.started.connect(self.camera_worker.run)
         self.camera_worker.frame_ready.connect(self.update_camera_feed)
@@ -1894,14 +1973,43 @@ class MainWindow(QMainWindow):
         else:
             self.connection_status_indicator.setText("Disconnected"); self.connection_status_indicator.setStyleSheet("background-color:red;color:white;font-weight:bold;")
 
+    def populate_usb_cameras(self):
+        self.log_to_console("INFO: Searching for USB cameras...")
+        self.usb_camera_combo.clear()
+
+        # On Linux, /dev/video* are the camera devices.
+        # We can list them to find available cameras without noisy probing.
+        video_devices = sorted([dev for dev in os.listdir('/dev') if dev.startswith('video')])
+
+        for device_name in video_devices:
+            # Extract the index from the device name (e.g., 'video0' -> 0)
+            try:
+                index = int(device_name.replace('video', ''))
+                self.usb_camera_combo.addItem(f"Camera {index}")
+            except (ValueError, IndexError):
+                continue # Ignore devices with non-numeric suffixes
+
+        if self.usb_camera_combo.count() == 0:
+            self.log_to_console("INFO: No USB cameras found.")
+            self.usb_camera_combo.addItem("No cameras found")
+            self.usb_camera_combo.setEnabled(False)
+        else:
+            self.log_to_console(f"INFO: Found {self.usb_camera_combo.count()} USB camera(s).")
+            self.usb_camera_combo.setEnabled(True)
+
     def load_settings(self):
         defaults={"probe/distance":"-25","probe/feedrate":"25","probe/thickness":"1.0","probe/slow_feedrate":"10","probe/retract_dist":"2","probe/tool_radius":"3.15"}
         for key,widget in self.get_settings_widgets().items(): widget.setText(self.settings.value(key, defaults.get(key)))
         self.park_on_finish_checkbox.setChecked(self.settings.value("gcode/park_on_finish", True, type=bool))
+        self.camera_type_combo.setCurrentText(self.settings.value("camera/type", "PiCamera"))
+        self.usb_camera_combo.setCurrentText(self.settings.value("camera/usb_device", "Camera 0"))
+
 
     def save_settings(self):
         for key,widget in self.get_settings_widgets().items(): self.settings.setValue(key, widget.text())
         self.settings.setValue("gcode/park_on_finish", self.park_on_finish_checkbox.isChecked())
+        self.settings.setValue("camera/type", self.camera_type_combo.currentText())
+        self.settings.setValue("camera/usb_device", self.usb_camera_combo.currentText())
         for setting,field in self.get_grbl_fields().items():
             if field.text() != self.initial_grbl_settings.get(setting,''): self.send_command(f"{setting}={field.text()}")
         self.log_to_console("INFO: Settings saved.")
