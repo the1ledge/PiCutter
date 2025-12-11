@@ -1186,19 +1186,14 @@ class MainWindow(QMainWindow):
             self.feed_rate_readout_label.setText(f"OVR: 100%\n(Max: {max_rate:.0f})")
 
     def on_gcode_line_sent(self, line_index):
-        if line_index >= 0:
-            item = QTableWidgetItem("Sent")
-            self.gcode_table.setItem(line_index, 2, item)
-            self.gcode_table.item(line_index, 2).setBackground(QColor("yellow"))
-            self.gcode_table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+        # Update the rolling window display instead of specific rows
+        self.update_gcode_table_window()
 
     def on_gcode_line_executed(self, line_index):
-        if line_index >= 0:
-            item = QTableWidgetItem("Executed")
-            self.gcode_table.setItem(line_index, 2, item)
-            self.gcode_table.item(line_index, 2).setBackground(QColor("lightgreen"))
-            self.update_progress_display()
-            self.retry_count = 0 # Reset retry count on successful execution
+        # Update the rolling window display to show progress
+        self.update_gcode_table_window()
+        self.update_progress_display()
+        self.retry_count = 0 # Reset retry count on successful execution
 
     def on_gcode_job_error(self, error_message):
         if self.gcode_is_running:
@@ -1799,13 +1794,62 @@ class MainWindow(QMainWindow):
             self.log_to_console(f"DEBUG: Initial time estimated: {time_str}")
         else:
             self.gcode_progress.setFormat("0.0%")
-        self.gcode_table.setRowCount(len(self.gcode_lines))
-        for i, line in enumerate(self.gcode_lines):
-            self.gcode_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.gcode_table.setItem(i, 1, QTableWidgetItem(line))
-            self.gcode_table.setItem(i, 2, QTableWidgetItem("Queued"))
+        # self.gcode_table.setRowCount(len(self.gcode_lines)) # REMOVED: Causes crash on large files
+        self.gcode_table.setRowCount(21) # Rolling window of 21 lines (10 history + current + 10 future)
+        self.update_gcode_table_window() # Initial population
         self.gcode_table.resizeColumnsToContents()
         self.update_ui_states()
+
+    def update_gcode_table_window(self):
+        """Updates the table to show a window around the current line."""
+        if not self.gcode_lines:
+            self.gcode_table.setRowCount(0)
+            return
+
+        window_size = 21
+        half_window = window_size // 2
+
+        # Calculate start index to keep current line centered
+        start_index = self.gcode_current_line - half_window
+
+        # Clamp start index
+        # If we are near the beginning, start at 0
+        if start_index < 0:
+            start_index = 0
+
+        # Ensure we don't go past the end
+        # (Though with a fixed window size, we just show blank rows if needed)
+
+        for row in range(window_size):
+            file_index = start_index + row
+
+            if 0 <= file_index < len(self.gcode_lines):
+                line_no = str(file_index + 1)
+                command = self.gcode_lines[file_index]
+
+                status = "Queued"
+                bg_color = QColor("white")
+
+                if file_index < self.gcode_current_line:
+                    status = "Executed"
+                    bg_color = QColor("lightgreen")
+                elif file_index == self.gcode_current_line:
+                    status = "Current"
+                    bg_color = QColor("yellow")
+
+                self.gcode_table.setItem(row, 0, QTableWidgetItem(line_no))
+                self.gcode_table.setItem(row, 1, QTableWidgetItem(command))
+                self.gcode_table.setItem(row, 2, QTableWidgetItem(status))
+
+                # Apply color to all cells in the row
+                for col in range(3):
+                    if self.gcode_table.item(row, col):
+                        self.gcode_table.item(row, col).setBackground(bg_color)
+            else:
+                # Clear rows that are out of bounds (e.g. at end of file)
+                for col in range(3):
+                    self.gcode_table.setItem(row, col, QTableWidgetItem(""))
+                    self.gcode_table.item(row, col).setBackground(QColor("white"))
 
     def update_ui_states(self):
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
