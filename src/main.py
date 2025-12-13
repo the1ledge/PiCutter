@@ -964,6 +964,22 @@ class MainWindow(QMainWindow):
         gcode_actions_layout.addWidget(self.start_button)
         gcode_actions_layout.addWidget(self.pause_button)
         gcode_actions_layout.addWidget(self.stop_button)
+
+        # Resume Controls
+        resume_layout = QHBoxLayout()
+        resume_label = QLabel("Start Line:")
+        self.resume_line_input = QLineEdit("1")
+        self.resume_line_input.setMaximumWidth(60)
+        self.numpad_enabled_fields.append(self.resume_line_input)
+        self.resume_line_input.installEventFilter(self)
+
+        self.resume_button = QPushButton("Smart Resume")
+        resume_layout.addWidget(resume_label)
+        resume_layout.addWidget(self.resume_line_input)
+        resume_layout.addWidget(self.resume_button)
+
+        gcode_actions_layout.addLayout(resume_layout)
+
         self.check_mode_button = QPushButton("Check Mode")
         self.check_mode_button.setCheckable(True)
         gcode_actions_layout.addWidget(self.check_mode_button)
@@ -1131,6 +1147,7 @@ class MainWindow(QMainWindow):
         self.z_minus_button.clicked.connect(lambda:self.send_jog_command("Z",-1,self.z_minus_button))
         self.load_file_button.clicked.connect(self.load_gcode_file)
         self.start_button.clicked.connect(self.start_gcode)
+        self.resume_button.clicked.connect(self.resume_gcode_job)
         self.pause_button.clicked.connect(self.pause_gcode)
         self.stop_button.clicked.connect(self.stop_gcode)
         self.home_button.clicked.connect(self.run_homing_cycle)
@@ -1920,14 +1937,81 @@ class MainWindow(QMainWindow):
 
     def start_gcode(self):
         if self.gcode_lines:
-            for i in range(self.gcode_table.rowCount()):
-                item = QTableWidgetItem("Queued"); self.gcode_table.setItem(i, 2, item); self.gcode_table.item(i, 2).setBackground(QColor("white"))
+            # Reset table status (conceptually, though window only shows subset)
             self.probe_succeeded = self.is_manually_zeroed = False
             self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = True, False, 0
             self.retry_count = 0 # Initialize retry counter
             self.gcode_start_time = time.time()
             self.update_ui_states()
             self.send_next_gcode_line()
+
+    def get_resume_state_header(self, target_index):
+        """Scans G-code from start to target_index to build a state restoration string."""
+        state = {
+            'motion': 'G90', 'units': 'G21', 'plane': 'G17', 'wcs': 'G54',
+            'feed': None, 'spindle': None, 'spindle_mode': 'M5', 'coolant': 'M9', 'tool': None
+        }
+
+        patterns = {
+            'motion': r'(G90|G91)', 'units': r'(G20|G21)', 'plane': r'(G17|G18|G19)',
+            'wcs': r'(G5[4-9])', 'feed': r'F([\d\.]+)', 'spindle': r'S([\d\.]+)',
+            'spindle_mode': r'(M3|M4|M5)', 'coolant': r'(M7|M8|M9)', 'tool': r'T(\d+)'
+        }
+
+        for i in range(target_index):
+            line = self.gcode_lines[i]
+            for key, pattern in patterns.items():
+                match = re.search(pattern, line)
+                if match:
+                    if key in ['feed', 'spindle', 'tool']:
+                        state[key] = match.group(1)
+                    else:
+                        state[key] = match.group(1)
+
+        preamble_parts = []
+        preamble_parts.append(state['motion'])
+        preamble_parts.append(state['units'])
+        preamble_parts.append(state['plane'])
+        preamble_parts.append(state['wcs'])
+        if state['feed']: preamble_parts.append(f"F{state['feed']}")
+        if state['spindle']: preamble_parts.append(f"S{state['spindle']}")
+        if state['tool']: preamble_parts.append(f"T{state['tool']}")
+        preamble_parts.append(state['spindle_mode'])
+        if state['coolant'] != 'M9': preamble_parts.append(state['coolant'])
+
+        return " ".join(preamble_parts)
+
+    def resume_gcode_job(self):
+        if not self.gcode_lines: return
+        try:
+            start_line = int(self.resume_line_input.text())
+            if start_line < 1: start_line = 1
+            if start_line > len(self.gcode_lines): start_line = len(self.gcode_lines)
+        except ValueError:
+            return
+
+        target_index = start_line - 1
+
+        # Build and send restoration header
+        header = self.get_resume_state_header(target_index)
+        self.log_to_console(f"INFO: Resuming at line {start_line}. Restoring state: {header}")
+        self.send_command(header)
+
+        # Start job
+        self.probe_succeeded = self.is_manually_zeroed = False
+        self.gcode_is_running, self.gcode_is_paused = True, False
+        self.gcode_current_line = target_index
+        self.retry_count = 0
+        self.gcode_start_time = time.time()
+        self.update_ui_states()
+
+        # Give the machine a moment to process the header before blasting the next line
+        # Since we use Ping-Pong, the header 'ok' will trigger the next line naturally?
+        # Actually, we sent the header via send_command, which sets command_pending.
+        # So when the header returns 'ok', send_next_gcode_line will be called!
+        # But wait, send_next_gcode_line checks if gcode_is_running.
+        # If we set gcode_is_running = True immediately, the 'ok' from header might trigger the first line.
+        # Yes, that logic holds.
 
     def pause_gcode(self):
         if self.gcode_is_running:
