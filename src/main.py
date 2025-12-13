@@ -424,6 +424,12 @@ class GCodeChecker:
         self.is_absolute_mode = True
         feed_rate_set = False
 
+        # Pre-compile regex for checker
+        re_motion_codes = re.compile(r'\b(G0|G1|G2|G3)\b')
+        re_x = re.compile(r'X([-\d.]+)')
+        re_y = re.compile(r'Y([-\d.]+)')
+        re_z = re.compile(r'Z([-\d.]+)')
+
         if not is_connected:
             self.issues.append({
                 'line': 0,
@@ -445,12 +451,12 @@ class GCodeChecker:
                 feed_rate_set = True
 
             # --- Update position for motion commands ---
-            motion_codes = re.findall(r'\b(G0|G1|G2|G3)\b', command)
+            motion_codes = re_motion_codes.findall(command)
             if motion_codes:
                 # Safely parse axis values
-                x_match = re.search(r'X([-\d.]+)', command)
-                y_match = re.search(r'Y([-\d.]+)', command)
-                z_match = re.search(r'Z([-\d.]+)', command)
+                x_match = re_x.search(command)
+                y_match = re_y.search(command)
+                z_match = re_z.search(command)
 
                 x_val = float(x_match.group(1)) if x_match else None
                 y_val = float(y_match.group(1)) if y_match else None
@@ -655,6 +661,40 @@ class MainWindow(QMainWindow):
             36: "Unused words: Extra words were found that don't apply to the current command."
         }
 
+        # Initialize Console Buffer and Regexes EARLY (before any logging happens)
+        self.console_buffer = []
+        self.console_update_timer = QTimer(self)
+        self.console_update_timer.setInterval(200) # Update console every 200ms
+        self.console_update_timer.timeout.connect(self.flush_console_buffer)
+        self.console_update_timer.start()
+
+        # Pre-compile regex for performance
+        self.re_comment_paren = re.compile(r'\(.*?\)')
+        self.re_word_value = re.compile(r'([a-zA-Z])\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))')
+        self.re_buffer_status = re.compile(r"Bf:(\d+),(\d+)")
+        self.re_state = re.compile(r"<([^|:]+)")
+        self.re_alarm = re.compile(r"Alarm:(\d+)")
+        self.re_probe_status = re.compile(r"\|Pn:([^|]+)")
+        self.re_mpos = re.compile(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)")
+        self.re_wco = re.compile(r"WCO:([\d.-]+),([\d.-]+),([\d.-]+)")
+        self.re_feed = re.compile(r"FS:([\d.-]+),(\d+)")
+        self.re_override = re.compile(r"Ov:(\d+),(\d+),(\d+)")
+        self.re_prb = re.compile(r"\[PRB:([\d.-]+),([\d.-]+),([\d.-]+):")
+        self.re_error_code = re.compile(r'\d+')
+        self.re_gcode_search_x = re.compile(r'X([-\d.]+)')
+        self.re_gcode_search_y = re.compile(r'Y([-\d.]+)')
+        self.re_gcode_search_z = re.compile(r'Z([-\d.]+)')
+        self.re_gcode_search_f = re.compile(r'F([-\d.]+)')
+        self.re_resume_motion = re.compile(r'(G90|G91)')
+        self.re_resume_units = re.compile(r'(G20|G21)')
+        self.re_resume_plane = re.compile(r'(G17|G18|G19)')
+        self.re_resume_wcs = re.compile(r'(G5[4-9])')
+        self.re_resume_feed = re.compile(r'F([\d\.]+)')
+        self.re_resume_spindle = re.compile(r'S([\d\.]+)')
+        self.re_resume_spindle_mode = re.compile(r'(M3|M4|M5)')
+        self.re_resume_coolant = re.compile(r'(M7|M8|M9)')
+        self.re_resume_tool = re.compile(r'T(\d+)')
+
         # --- THIS IS THE CORRECTED, COMPLETE DICTIONARY ---
         self.GRBL_SETTINGS_INFO = {
             "$0": {"label": "Step pulse time (μs)", "tooltip": "Sets the step pulse duration. A value around 10 microseconds is recommended."},
@@ -833,6 +873,7 @@ class MainWindow(QMainWindow):
         self.check_mode_pulse_timer.setInterval(500)
         self.check_mode_pulse_timer.timeout.connect(self.pulse_check_mode_button)
         self.check_mode_pulse_state = 0
+
         self.populate_ports()
         self.populate_usb_cameras()
         self.update_connection_indicator(False)
@@ -1374,17 +1415,29 @@ class MainWindow(QMainWindow):
             self.camera_thread.wait()
 
     def log_to_console(self, message):
-        if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'): return
-        if self.filter_pos_checkbox.isChecked() and message.startswith('RX: <') and 'MPos:' in message: return
+        # Check if UI elements are initialized before accessing them
+        if hasattr(self, 'filter_ok_checkbox') and hasattr(self, 'filter_pos_checkbox'):
+            if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'): return
+            if self.filter_pos_checkbox.isChecked() and message.startswith('RX: <') and 'MPos:' in message: return
 
         log_message = message
         if message.startswith("DEBUG:"):
             log_message = f"# {message}"
 
-        self.console_output.moveCursor(QTextCursor.Start)
-        self.console_output.insertPlainText(log_message + '\n')
+        self.console_buffer.append(log_message)
 
-        # Enforce a 500-line limit by removing the oldest lines (at the bottom) in a single operation
+    def flush_console_buffer(self):
+        if not self.console_buffer:
+            return
+
+        # Join buffered messages and insert at once
+        text_chunk = '\n'.join(self.console_buffer) + '\n'
+        self.console_buffer = [] # Clear buffer
+
+        self.console_output.moveCursor(QTextCursor.Start)
+        self.console_output.insertPlainText(text_chunk)
+
+        # Enforce limit (batch cleanup)
         doc = self.console_output.document()
         block_count = doc.blockCount()
         if block_count > 500:
@@ -1396,7 +1449,7 @@ class MainWindow(QMainWindow):
         self.log_to_console(f"RX: {data}")
         if data.startswith("<"):
             # Parse buffer status if present
-            buffer_match = re.search(r"Bf:(\d+),(\d+)", data)
+            buffer_match = self.re_buffer_status.search(data)
             if buffer_match:
                 self.planner_buffer_blocks = int(buffer_match.group(1))
                 self.rx_buffer_bytes = int(buffer_match.group(2))
@@ -1407,29 +1460,29 @@ class MainWindow(QMainWindow):
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
                 self.is_homed = True
-            state_match = re.search(r"<([^|:]+)", data)
+            state_match = self.re_state.search(data)
             if state_match:
                 new_state = state_match.group(1)
                 if new_state != self.machine_state:
                     self.machine_state = new_state
                     if self.machine_state == "Alarm":
-                        alarm_match = re.search(r"Alarm:(\d+)", data)
+                        alarm_match = self.re_alarm.search(data)
                         if alarm_match: self.current_alarm_code = int(alarm_match.group(1))
                         self.is_probing = False
                     else:
                         self.current_alarm_code = None
                     self.update_ui_states()
-            probe_match = re.search(r"\|Pn:([^|]+)", data)
+            probe_match = self.re_probe_status.search(data)
             probe_triggered = 'P' in probe_match.group(1) if probe_match else False
             self.last_probe_state = probe_triggered
             self.probe_status_changed.emit(probe_triggered)
-            pos_match = re.search(r"MPos:([\d.-]+),([\d.-]+),([\d.-]+)", data)
+            pos_match = self.re_mpos.search(data)
             if pos_match:
                 self.mpos_x,self.mpos_y,self.mpos_z = (float(c) for c in pos_match.groups())
                 self.x_pos_label.setText(f"{self.mpos_x:.3f}")
                 self.y_pos_label.setText(f"{self.mpos_y:.3f}")
                 self.z_pos_label.setText(f"{self.mpos_z:.3f}")
-                wco_match = re.search(r"WCO:([\d.-]+),([\d.-]+),([\d.-]+)", data)
+                wco_match = self.re_wco.search(data)
                 if wco_match:
                     self.wco_x,self.wco_y,self.wco_z = (float(c) for c in wco_match.groups())
                 wpos_x,wpos_y,wpos_z = self.mpos_x-self.wco_x, self.mpos_y-self.wco_y, self.mpos_z-self.wco_z
@@ -1438,12 +1491,12 @@ class MainWindow(QMainWindow):
                 self.wpos_z_label.setText(f"{wpos_z:.3f}")
 
             # --- Feed Rate Parsing ---
-            feed_match = re.search(r"FS:([\d.-]+),(\d+)", data)
+            feed_match = self.re_feed.search(data)
             if feed_match:
                 self.current_feed_rate = float(feed_match.group(1))
                 # The second value is spindle, which we don't need here.
 
-            override_match = re.search(r"Ov:(\d+),(\d+),(\d+)", data)
+            override_match = self.re_override.search(data)
             if override_match:
                 self.feed_override_percent = int(override_match.group(1))
 
@@ -1525,7 +1578,7 @@ class MainWindow(QMainWindow):
         elif data.startswith("[PRB:"):
             if self.is_advanced_probing:
                 self.probe_response_count += 1
-                prb_match = re.search(r"\[PRB:([\d.-]+),([\d.-]+),([\d.-]+):", data)
+                prb_match = self.re_prb.search(data)
                 if prb_match and self.probe_response_count > 1: # Ignore fast probe
                     if self.xyz_probe_stage == 'Z': val = float(prb_match.group(3))
                     elif self.xyz_probe_stage == 'X': val = float(prb_match.group(1))
@@ -1759,12 +1812,12 @@ class MainWindow(QMainWindow):
         with open(filepath, 'r') as f:
             for line in f:
                 # 1. Remove comments
-                line = re.sub(r'\(.*?\)', '', line) # Remove (...) comments
+                line = self.re_comment_paren.sub('', line) # Remove (...) comments
                 line = line.split(';')[0]          # Remove ; comments
 
                 # 2. Normalize and Round Coordinates
                 # Find all "Letter+Number" patterns (e.g., G1, X1.234, F100)
-                matches = re.findall(r'([a-zA-Z])\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))', line)
+                matches = self.re_word_value.findall(line)
 
                 if matches:
                     new_parts = []
@@ -1850,16 +1903,13 @@ class MainWindow(QMainWindow):
         start_index = self.gcode_current_line - half_window
 
         # Clamp start index
-        # If we are near the beginning, start at 0
         if start_index < 0:
             start_index = 0
-
-        # Ensure we don't go past the end
-        # (Though with a fixed window size, we just show blank rows if needed)
 
         for row in range(window_size):
             file_index = start_index + row
 
+            # Prepare data
             if 0 <= file_index < len(self.gcode_lines):
                 line_no = str(file_index + 1)
                 command = self.gcode_lines[file_index]
@@ -1873,20 +1923,29 @@ class MainWindow(QMainWindow):
                 elif file_index == self.gcode_current_line:
                     status = "Current"
                     bg_color = QColor("yellow")
-
-                self.gcode_table.setItem(row, 0, QTableWidgetItem(line_no))
-                self.gcode_table.setItem(row, 1, QTableWidgetItem(command))
-                self.gcode_table.setItem(row, 2, QTableWidgetItem(status))
-
-                # Apply color to all cells in the row
-                for col in range(3):
-                    if self.gcode_table.item(row, col):
-                        self.gcode_table.item(row, col).setBackground(bg_color)
             else:
-                # Clear rows that are out of bounds (e.g. at end of file)
-                for col in range(3):
-                    self.gcode_table.setItem(row, col, QTableWidgetItem(""))
-                    self.gcode_table.item(row, col).setBackground(QColor("white"))
+                line_no = ""
+                command = ""
+                status = ""
+                bg_color = QColor("white")
+
+            # Update Items (Recycling)
+            col_data = [line_no, command, status]
+            for col in range(3):
+                item = self.gcode_table.item(row, col)
+                if not item:
+                    item = QTableWidgetItem()
+                    self.gcode_table.setItem(row, col, item)
+
+                # Only update if changed (optimization)
+                if item.text() != col_data[col]:
+                    item.setText(col_data[col])
+
+                # Background color update
+                # Checking background color equality is tricky/slow, just set it.
+                # But we can optimize by checking a stored custom property? No, keep it simple.
+                if item.background().color() != bg_color:
+                    item.setBackground(bg_color)
 
     def update_ui_states(self):
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
@@ -1972,21 +2031,38 @@ class MainWindow(QMainWindow):
             'feed': None, 'spindle': None, 'spindle_mode': 'M5', 'coolant': 'M9', 'tool': None
         }
 
-        patterns = {
-            'motion': r'(G90|G91)', 'units': r'(G20|G21)', 'plane': r'(G17|G18|G19)',
-            'wcs': r'(G5[4-9])', 'feed': r'F([\d\.]+)', 'spindle': r'S([\d\.]+)',
-            'spindle_mode': r'(M3|M4|M5)', 'coolant': r'(M7|M8|M9)', 'tool': r'T(\d+)'
-        }
+        # Pre-compiled patterns stored in self.re_resume_*
 
         for i in range(target_index):
             line = self.gcode_lines[i]
-            for key, pattern in patterns.items():
-                match = re.search(pattern, line)
-                if match:
-                    if key in ['feed', 'spindle', 'tool']:
-                        state[key] = match.group(1)
-                    else:
-                        state[key] = match.group(1)
+
+            # Efficiently scan for each modal group
+            m = self.re_resume_motion.search(line)
+            if m: state['motion'] = m.group(1)
+
+            m = self.re_resume_units.search(line)
+            if m: state['units'] = m.group(1)
+
+            m = self.re_resume_plane.search(line)
+            if m: state['plane'] = m.group(1)
+
+            m = self.re_resume_wcs.search(line)
+            if m: state['wcs'] = m.group(1)
+
+            m = self.re_resume_feed.search(line)
+            if m: state['feed'] = m.group(1)
+
+            m = self.re_resume_spindle.search(line)
+            if m: state['spindle'] = m.group(1)
+
+            m = self.re_resume_spindle_mode.search(line)
+            if m: state['spindle_mode'] = m.group(1)
+
+            m = self.re_resume_coolant.search(line)
+            if m: state['coolant'] = m.group(1)
+
+            m = self.re_resume_tool.search(line)
+            if m: state['tool'] = m.group(1)
 
         preamble_parts = []
         preamble_parts.append(state['motion'])
@@ -2064,10 +2140,20 @@ class MainWindow(QMainWindow):
             if "G91" in cmd: is_abs=False
             if cmd.startswith(("G0","G1")):
                 tx,ty,tz=x,y,z
-                if "X" in cmd: tx=float(re.search(r'X([-\d.]+)',cmd).group(1)) if is_abs else x+float(re.search(r'X([-\d.]+)',cmd).group(1))
-                if "Y" in cmd: ty=float(re.search(r'Y([-\d.]+)',cmd).group(1)) if is_abs else y+float(re.search(r'Y([-\d.]+)',cmd).group(1))
-                if "Z" in cmd: tz=float(re.search(r'Z([-\d.]+)',cmd).group(1)) if is_abs else z+float(re.search(r'Z([-\d.]+)',cmd).group(1))
-                if "F" in cmd: feed=float(re.search(r'F([-\d.]+)',cmd).group(1))
+
+                # Use pre-compiled regex for estimation
+                x_match = self.re_gcode_search_x.search(cmd)
+                if x_match: tx=float(x_match.group(1)) if is_abs else x+float(x_match.group(1))
+
+                y_match = self.re_gcode_search_y.search(cmd)
+                if y_match: ty=float(y_match.group(1)) if is_abs else y+float(y_match.group(1))
+
+                z_match = self.re_gcode_search_z.search(cmd)
+                if z_match: tz=float(z_match.group(1)) if is_abs else z+float(z_match.group(1))
+
+                f_match = self.re_gcode_search_f.search(cmd)
+                if f_match: feed=float(f_match.group(1))
+
                 dist=math.sqrt((tx-x)**2+(ty-y)**2+(tz-z)**2)
                 if dist > 0:
                     if cmd.startswith("G0"):
