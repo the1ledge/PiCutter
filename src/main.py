@@ -727,25 +727,43 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         top_bar_layout = QHBoxLayout()
+        # Reduce spacing/margins for compactness
+        top_bar_layout.setContentsMargins(0, 0, 0, 0)
+        top_bar_layout.setSpacing(4)
+
         self.e_stop_button = QPushButton("EMERGENCY STOP\n(Reset)")
         self.e_stop_button.setObjectName("emergencyStop")
-        self.e_stop_button.setFixedHeight(40)
+        self.e_stop_button.setFixedHeight(40) # Keep E-Stop noticeable
         top_bar_layout.addWidget(self.e_stop_button)
+
         self.unlock_button = QPushButton("Unlock ($X)")
         self.unlock_button.setFixedHeight(40)
         top_bar_layout.addWidget(self.unlock_button)
+
         top_bar_layout.addStretch()
+
+        # System Buttons - Compact Grid
+        system_buttons_layout = QGridLayout()
+        system_buttons_layout.setSpacing(2)
+        system_buttons_layout.setContentsMargins(0, 0, 0, 0)
+
         self.connect_button = QPushButton("Connect")
         self.connection_status_indicator = QPushButton("Disconnected")
         self.connection_status_indicator.setCheckable(False)
         self.connection_status_indicator.setEnabled(False)
-        system_buttons_layout = QGridLayout()
-        self.exit_button = QPushButton("Exit Application")
-        self.shutdown_button = QPushButton("Shutdown Pi")
+        self.exit_button = QPushButton("Exit App")
+        self.shutdown_button = QPushButton("Shutdown")
+
+        # Reduce button height to save vertical space
+        for btn in [self.connect_button, self.connection_status_indicator, self.exit_button, self.shutdown_button]:
+            btn.setFixedHeight(24) # Shorter buttons
+            btn.setStyleSheet("font-size: 8pt; padding: 2px;") # Smaller font
+
         system_buttons_layout.addWidget(self.connect_button, 0, 0)
         system_buttons_layout.addWidget(self.exit_button, 0, 1)
         system_buttons_layout.addWidget(self.connection_status_indicator, 1, 0)
         system_buttons_layout.addWidget(self.shutdown_button, 1, 1)
+
         top_bar_layout.addLayout(system_buttons_layout)
         main_layout.addLayout(top_bar_layout)
         self.tabs = QTabWidget()
@@ -959,17 +977,23 @@ class MainWindow(QMainWindow):
         gcode_file_layout.addWidget(self.load_file_button)
         gcode_file_layout.addWidget(self.gcode_file_label, 1)
         self.gcode_progress = QProgressBar()
-        gcode_actions_layout = QHBoxLayout()
-        self.start_button, self.pause_button, self.stop_button = QPushButton("Start"), QPushButton("Pause"), QPushButton("Stop")
-        gcode_actions_layout.addWidget(self.start_button)
-        gcode_actions_layout.addWidget(self.pause_button)
-        gcode_actions_layout.addWidget(self.stop_button)
 
-        # Resume Controls
+        # Row 1: Transport Controls (Start, Pause, Stop, Check Mode)
+        transport_layout = QHBoxLayout()
+        self.start_button, self.pause_button, self.stop_button = QPushButton("Start"), QPushButton("Pause"), QPushButton("Stop")
+        self.check_mode_button = QPushButton("Check Mode")
+        self.check_mode_button.setCheckable(True)
+
+        transport_layout.addWidget(self.start_button)
+        transport_layout.addWidget(self.pause_button)
+        transport_layout.addWidget(self.stop_button)
+        transport_layout.addWidget(self.check_mode_button)
+
+        # Row 2: Resume Controls
         resume_layout = QHBoxLayout()
         resume_label = QLabel("Start Line:")
         self.resume_line_input = QLineEdit("1")
-        self.resume_line_input.setMaximumWidth(60)
+        self.resume_line_input.setMaximumWidth(80) # Slightly wider
         self.numpad_enabled_fields.append(self.resume_line_input)
         self.resume_line_input.installEventFilter(self)
 
@@ -977,15 +1001,11 @@ class MainWindow(QMainWindow):
         resume_layout.addWidget(resume_label)
         resume_layout.addWidget(self.resume_line_input)
         resume_layout.addWidget(self.resume_button)
+        resume_layout.addStretch() # Push resume controls to the left
 
-        gcode_actions_layout.addLayout(resume_layout)
-
-        self.check_mode_button = QPushButton("Check Mode")
-        self.check_mode_button.setCheckable(True)
-        gcode_actions_layout.addWidget(self.check_mode_button)
-        gcode_actions_layout.addStretch()
         gcode_group_layout.addLayout(gcode_file_layout)
-        gcode_group_layout.addLayout(gcode_actions_layout)
+        gcode_group_layout.addLayout(transport_layout)
+        gcode_group_layout.addLayout(resume_layout)
         gcode_group_layout.addWidget(self.gcode_progress)
         gcode_group.setLayout(gcode_group_layout)
         left_panel_layout.addWidget(gcode_group)
