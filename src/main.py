@@ -854,7 +854,8 @@ class MainWindow(QMainWindow):
         self.grbl_settings_count = 0
         self.gcode_start_time = None
         self.gcode_estimated_time = 0
-        self.gcode_line_times = []
+        self.gcode_line_times = np.array([], dtype=np.float32)
+        self.job_elapsed_time = 0.0
         self.command_pending = False
         self.planner_buffer_blocks = 0
         self.rx_buffer_bytes = 0
@@ -1268,6 +1269,10 @@ class MainWindow(QMainWindow):
         self.update_gcode_table_window()
 
     def on_gcode_line_executed(self, line_index):
+        # Update running time total (O(1) operation)
+        if 0 <= line_index < len(self.gcode_line_times):
+            self.job_elapsed_time += self.gcode_line_times[line_index]
+
         # Update the rolling window display to show progress
         self.update_gcode_table_window()
         self.update_progress_display()
@@ -2020,6 +2025,7 @@ class MainWindow(QMainWindow):
             self.probe_succeeded = self.is_manually_zeroed = False
             self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = True, False, 0
             self.retry_count = 0 # Initialize retry counter
+            self.job_elapsed_time = 0.0 # Reset accumulated time
             self.gcode_start_time = time.time()
             self.update_ui_states()
             self.send_next_gcode_line()
@@ -2098,6 +2104,13 @@ class MainWindow(QMainWindow):
         self.gcode_is_running, self.gcode_is_paused = True, False
         self.gcode_current_line = target_index
         self.retry_count = 0
+
+        # Pre-calculate elapsed time for skipped lines
+        if len(self.gcode_line_times) > 0:
+            self.job_elapsed_time = float(np.sum(self.gcode_line_times[:target_index]))
+        else:
+            self.job_elapsed_time = 0.0
+
         self.gcode_start_time = time.time()
         self.update_ui_states()
 
@@ -2133,7 +2146,9 @@ class MainWindow(QMainWindow):
         except (KeyError, ValueError):
             max_x,max_y,max_z=5000,5000,1000; src="Defaults"
         self.log_to_console(f"DEBUG: Estimating time with Max Rates (X,Y,Z): {max_x}, {max_y}, {max_z} from {src}")
-        x,y,z,feed,total_time=0,0,0,1000,0; is_abs=True; self.gcode_line_times=[]
+        x,y,z,feed,total_time=0,0,0,1000,0; is_abs=True;
+        times_list = []
+
         for line in self.gcode_lines:
             line_time = 0; cmd = line.upper().split(';')[0]
             if "G90" in cmd: is_abs=True
@@ -2160,14 +2175,22 @@ class MainWindow(QMainWindow):
                         line_time = max(abs(tx-x)/max_x if max_x>0 else 0, abs(ty-y)/max_y if max_y>0 else 0, abs(tz-z)/max_z if max_z>0 else 0) * 60
                     else: line_time = dist/(feed/60)
                 x,y,z = tx,ty,tz
-            total_time+=line_time; self.gcode_line_times.append(line_time)
+            total_time+=line_time; times_list.append(line_time)
+
+        # Convert to numpy array for efficiency and set class attribute
+        self.gcode_line_times = np.array(times_list, dtype=np.float32)
         return total_time
 
     def update_progress_display(self):
-        if not self.gcode_is_running or not self.gcode_line_times or self.gcode_estimated_time==0: return
+        # Using numpy.size is safer than len() for numpy arrays in some contexts,
+        # but len() works fine on 1D arrays.
+        if not self.gcode_is_running or len(self.gcode_line_times) == 0 or self.gcode_estimated_time==0: return
         executed = min(self.gcode_current_line, len(self.gcode_line_times))
         self.gcode_progress.setValue(executed)
-        time_done = sum(self.gcode_line_times[:executed])
+
+        # Use running total instead of re-summing every time
+        time_done = self.job_elapsed_time
+
         time_left = self.gcode_estimated_time - time_done
         if time_left < 0: time_left = 0
         percent = (time_done / self.gcode_estimated_time) * 100
