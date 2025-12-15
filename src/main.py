@@ -154,7 +154,7 @@ class USBCameraWorker(QThread):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/60) # Limit frame rate
+            time.sleep(1/30) # Limit frame rate
 
         if self.cap:
             self.cap.release()
@@ -190,7 +190,7 @@ class CameraWorker(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/60)
+            time.sleep(1/30)
         if self.picam2:
             # The close() method should handle stopping the camera activities.
             # Calling stop() separately can cause race conditions with the
@@ -667,6 +667,13 @@ class MainWindow(QMainWindow):
         self.console_update_timer.setInterval(200) # Update console every 200ms
         self.console_update_timer.timeout.connect(self.flush_console_buffer)
         self.console_update_timer.start()
+
+        # UI Throttling Timer (10Hz)
+        self.gcode_table_dirty = False
+        self.ui_update_timer = QTimer(self)
+        self.ui_update_timer.setInterval(100)
+        self.ui_update_timer.timeout.connect(self.process_ui_updates)
+        self.ui_update_timer.start()
 
         # Pre-compile regex for performance
         self.re_comment_paren = re.compile(r'\(.*?\)')
@@ -1265,18 +1272,27 @@ class MainWindow(QMainWindow):
             self.feed_rate_readout_label.setText(f"OVR: 100%\n(Max: {max_rate:.0f})")
 
     def on_gcode_line_sent(self, line_index):
-        # Update the rolling window display instead of specific rows
-        self.update_gcode_table_window()
+        # Mark UI as dirty for batched update
+        self.gcode_table_dirty = True
 
     def on_gcode_line_executed(self, line_index):
         # Update running time total (O(1) operation)
         if 0 <= line_index < len(self.gcode_line_times):
             self.job_elapsed_time += self.gcode_line_times[line_index]
 
-        # Update the rolling window display to show progress
-        self.update_gcode_table_window()
-        self.update_progress_display()
+        # Mark UI as dirty for batched update
+        self.gcode_table_dirty = True
         self.retry_count = 0 # Reset retry count on successful execution
+
+    def process_ui_updates(self):
+        if self.gcode_table_dirty:
+            t0 = time.perf_counter()
+            self.update_gcode_table_window()
+            self.update_progress_display()
+            self.gcode_table_dirty = False
+            dt = time.perf_counter() - t0
+            if dt > 0.05: # Warn if UI update takes > 50ms
+                 self.log_to_console(f"DEBUG: Slow UI update: {dt*1000:.1f}ms")
 
     def on_gcode_job_error(self, error_message):
         if self.gcode_is_running:
@@ -1363,6 +1379,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(QImage)
     def update_camera_feed(self, image):
+        t0 = time.perf_counter()
         if image.isNull():
             return
         pixmap = QPixmap.fromImage(image)
@@ -1374,6 +1391,9 @@ class MainWindow(QMainWindow):
             w = max(1, min(self.gcode_video_label.width(), self.gcode_video_label.maximumWidth()))
             h = max(1, min(self.gcode_video_label.height(), self.gcode_video_label.maximumHeight()))
             self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        dt = time.perf_counter() - t0
+        if dt > 0.02:
+             self.log_to_console(f"DEBUG: Slow cam update: {dt*1000:.1f}ms")
 
     @pyqtSlot(str)
     def handle_camera_error(self, error_message):
@@ -1451,6 +1471,7 @@ class MainWindow(QMainWindow):
             cursor.removeSelectedText()
 
     def handle_serial_data(self, data):
+        t0 = time.perf_counter()
         self.log_to_console(f"RX: {data}")
         if data.startswith("<"):
             # Parse buffer status if present
@@ -1601,6 +1622,10 @@ class MainWindow(QMainWindow):
                 probe_thickness = float(self.settings.value("probe/thickness", 1.0))
                 self.send_command(f"G10 L2 P1 Z{probe_thickness}")
                 self.log_to_console(f"INFO: Probe successful. Z-axis zeroed to {probe_thickness}mm.")
+
+        dt = time.perf_counter() - t0
+        if dt > 0.02:
+             self.log_to_console(f"DEBUG: Slow serial handle: {dt*1000:.1f}ms")
 
     def run_probe_cycle(self):
         self.xyz_probe_stage = None  # Prevent stale state from previous 3-axis probe
