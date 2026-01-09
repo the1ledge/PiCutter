@@ -154,7 +154,7 @@ class USBCameraWorker(QThread):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/30) # Limit frame rate
+            time.sleep(1/15) # Limit frame rate (reduced for Pi 3B performance)
 
         if self.cap:
             self.cap.release()
@@ -190,7 +190,7 @@ class CameraWorker(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/30)
+            time.sleep(1/15) # Limit frame rate (reduced for Pi 3B performance)
         if self.picam2:
             # The close() method should handle stopping the camera activities.
             # Calling stop() separately can cause race conditions with the
@@ -1197,9 +1197,19 @@ class MainWindow(QMainWindow):
         grbl_group.setLayout(self.grbl_layout)
         layout.addWidget(left_column_widget, 1)
         layout.addWidget(grbl_group, 2)
+
+        # Bottom Action Bar
+        action_bar_layout = QHBoxLayout()
+        view_sys_log_button = QPushButton("View System Log (dmesg)")
+        view_sys_log_button.clicked.connect(self.view_system_log)
         save_button = QPushButton("Save All Settings")
         save_button.clicked.connect(self.save_settings)
-        tab_layout.addWidget(save_button)
+
+        action_bar_layout.addWidget(view_sys_log_button)
+        action_bar_layout.addStretch()
+        action_bar_layout.addWidget(save_button)
+
+        tab_layout.addLayout(action_bar_layout)
         self.load_settings()
         self.ensure_config_file_exists()
         self.load_grbl_config_file()
@@ -1440,6 +1450,14 @@ class MainWindow(QMainWindow):
             self.camera_thread.wait()
 
     def log_to_console(self, message):
+        # Write to debug file with high-precision timestamp
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
+            with open("serial_debug.log", "a") as f:
+                f.write(f"[{timestamp}] {message}\n")
+        except Exception:
+            pass # Don't crash if logging fails
+
         # Check if UI elements are initialized before accessing them
         if hasattr(self, 'filter_ok_checkbox') and hasattr(self, 'filter_pos_checkbox'):
             if self.filter_ok_checkbox.isChecked() and (message == 'RX: ok' or message == 'TX: ?'): return
@@ -1450,6 +1468,28 @@ class MainWindow(QMainWindow):
             log_message = f"# {message}"
 
         self.console_buffer.append(log_message)
+
+    def view_system_log(self):
+        try:
+            # Run dmesg and get the last 50 lines
+            import subprocess
+            result = subprocess.check_output("dmesg | tail -n 50", shell=True).decode('utf-8')
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("System Log (dmesg)")
+            dialog.setMinimumSize(600, 400)
+            layout = QVBoxLayout(dialog)
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            text_edit.setPlainText(result)
+            text_edit.setFont(QFont("Courier", 10))
+            layout.addWidget(text_edit)
+            btn_box = QDialogButtonBox(QDialogButtonBox.Close)
+            btn_box.rejected.connect(dialog.reject)
+            layout.addWidget(btn_box)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to retrieve system log:\n{e}")
 
     def flush_console_buffer(self):
         if not self.console_buffer:
@@ -1473,6 +1513,22 @@ class MainWindow(QMainWindow):
     def handle_serial_data(self, data):
         t0 = time.perf_counter()
         self.log_to_console(f"RX: {data}")
+
+        # --- SAFETY: Check for Controller Reset ---
+        # If the controller resets (Grbl startup msg) or alarms (Reset in motion) during a job,
+        # we MUST abort immediately. Continuing is dangerous as state is lost.
+        if self.gcode_is_running:
+            is_reset = "Grbl" in data and "['$'" in data # Standard startup string
+            is_alarm_reset = "ALARM:3" in data # Reset in motion
+
+            if is_reset or is_alarm_reset:
+                self.gcode_is_running = False
+                self.gcode_is_paused = False
+                self.log_to_console("CRITICAL: Controller Reset Detected! Aborting Job.")
+                self.serial_connection.flushOutput() # Clear any pending commands
+                self.gcode_job_error.emit("Controller Reset Detected! Possible electrical noise (EMI) or power loss. Job aborted.")
+                return
+
         if data.startswith("<"):
             # Parse buffer status if present
             buffer_match = self.re_buffer_status.search(data)
@@ -1553,9 +1609,15 @@ class MainWindow(QMainWindow):
                 except (ValueError, IndexError):
                     error_code = -1
 
-                # Retry on "Bad number format" (2), "Expected command letter" (1), or "Invalid statement" (3)
-                # These are likely due to transmission corruption (EMI/Noise).
-                if error_code in [1, 2, 3]:
+                # Retry on transient errors often caused by transmission corruption (EMI/Noise).
+                # 1: Expected word, 2: Bad format, 3: Invalid statement
+                # 20: Unsupported (noise can create garbage commands)
+                # 24: Invalid target (noise can flip a bit in a coordinate)
+                # 33: Invalid arc target (noise can corrupt I/J/R)
+                # 38: Arc radius error
+                retryable_errors = [1, 2, 3, 20, 24, 33, 38]
+
+                if error_code in retryable_errors:
                     if self.retry_count < 3:
                         self.retry_count += 1
                         self.log_to_console(f"WARNING: Transient error {error_code} detected. Retrying line {self.gcode_current_line} (Attempt {self.retry_count}/3)...")
