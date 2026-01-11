@@ -1536,9 +1536,9 @@ class MainWindow(QMainWindow):
             if buffer_match:
                 self.planner_buffer_blocks = int(buffer_match.group(1))
                 self.rx_buffer_bytes = int(buffer_match.group(2))
-                # Now that we have fresh buffer data, try to send the next line.
-                if self.gcode_is_running:
-                    self.send_next_gcode_line()
+                # Note: We intentionally do NOT trigger send_next_gcode_line() here.
+                # To maintain strict Ping-Pong protocol and prevent race conditions or buffer overflows,
+                # we must ONLY advance on 'ok' responses.
 
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
@@ -1646,6 +1646,11 @@ class MainWindow(QMainWindow):
                         return
                     else:
                          self.log_to_console(f"CRITICAL: Max retries exceeded for error {error_code}.")
+                         # Explicitly halt to prevent skipping lines or crashing the machine
+                         self.gcode_is_running = False
+                         self.gcode_is_paused = False
+                         self.gcode_job_error.emit(f"Max retries exceeded for error {error_code}. Job halted.")
+                         return
 
                 # If not retryable or retries exhausted, HALT.
                 self.serial_connection.write(b'\x18') # Send soft-reset
