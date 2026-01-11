@@ -863,7 +863,9 @@ class MainWindow(QMainWindow):
         self.gcode_estimated_time = 0
         self.gcode_line_times = np.array([], dtype=np.float32)
         self.job_elapsed_time = 0.0
-        self.command_pending = False
+        self.command_pending = False # Deprecated in favor of character counting, but kept for legacy/compatibility
+        self.chars_in_buffer = 0
+        self.pending_commands_lengths = []
         self.planner_buffer_blocks = 0
         self.rx_buffer_bytes = 0
         self.dro_timer = QTimer(self)
@@ -1597,6 +1599,13 @@ class MainWindow(QMainWindow):
 
         elif data.lower() == "ok":
             self.command_pending = False
+
+            # Update Character Counting Buffer
+            if self.pending_commands_lengths:
+                completed_len = self.pending_commands_lengths.pop(0)
+                self.chars_in_buffer -= completed_len
+                if self.chars_in_buffer < 0: self.chars_in_buffer = 0
+
             if self.is_advanced_probing:
                 self.send_next_probe_command()
             elif self.is_parking:
@@ -1604,12 +1613,23 @@ class MainWindow(QMainWindow):
             elif self.is_running_generic_queue:
                 self.send_next_generic_command()
             elif self.gcode_is_running and not self.gcode_is_paused:
-                # Emit a signal to update the UI from the main thread
-                self.gcode_line_executed.emit(self.gcode_current_line - 1)
+                # Emit a signal to update the UI from the main thread.
+                # Since we have multiple lines in flight, the "current_line" index is actually ahead.
+                # We want to confirm execution of the oldest line in flight... roughly.
+                # Visuals might lag slightly behind actual processing, which is fine.
+                # We simply signal that *a* line finished.
+                executed_line_index = self.gcode_current_line - len(self.pending_commands_lengths) - 1
+                if executed_line_index >= 0:
+                    self.gcode_line_executed.emit(executed_line_index)
+
                 self.send_next_gcode_line()
         elif data.startswith("error:"):
             self.log_to_console(f"DEBUG: Received '{data}', clearing command_pending.")
             self.command_pending = False
+
+            # On error, GRBL flush input buffer. We must reset our count.
+            self.chars_in_buffer = 0
+            self.pending_commands_lengths = []
 
             # Handle G-code job errors with Auto-Retry
             if self.gcode_is_running:
@@ -2322,26 +2342,34 @@ class MainWindow(QMainWindow):
 
     def send_next_gcode_line(self):
         if self.gcode_is_running and not self.gcode_is_paused:
-            if self.gcode_current_line < len(self.gcode_lines):
-                # Simple Ping-Pong Flow Control:
-                # 1. Check if we are waiting for an 'ok' from a previous command.
-                if self.command_pending:
-                    return
+            # Character-Counting Protocol Loop
+            # Send as many lines as possible until the RX buffer (127 bytes) is full.
+            while self.gcode_current_line < len(self.gcode_lines):
 
-                # 2. Planner Buffer Throttling:
-                # To prevent saturation (Bf:0), we pause sending if the planner has fewer than 3 blocks free.
-                # The user requested to "stop sending if it is at three" (meaning 3 or fewer slots free).
-                # We resume only when space clears up (Bf >= 3).
+                # Check Planner Buffer Safety (Optional user request: keep buffer >= 3)
+                # If the planner is too full, we pause.
                 if self.planner_buffer_blocks < 3:
-                    # self.log_to_console(f"DEBUG: Throttling. Planner buffer low: {self.planner_buffer_blocks}")
                     return
 
                 cmd = self.gcode_lines[self.gcode_current_line]
+                cmd_len = len(cmd) + 1 # +1 for '\n'
+
+                # GRBL RX Buffer Limit is 127 bytes
+                if self.chars_in_buffer + cmd_len > 127:
+                    # Buffer full, wait for 'ok' to free space
+                    return
+
                 if self.send_command(cmd):
+                    self.chars_in_buffer += cmd_len
+                    self.pending_commands_lengths.append(cmd_len)
                     self.gcode_line_sent.emit(self.gcode_current_line)
                     self.gcode_current_line += 1
-            else:
-                # G-code file is done, transition to parking or finish up.
+                else:
+                    # Send failed (port closed?), break loop
+                    break
+
+            if self.gcode_current_line >= len(self.gcode_lines) and not self.pending_commands_lengths:
+                # All commands sent AND all 'ok's received (buffer empty)
                 if self.park_on_finish_checkbox.isChecked() and not self.is_parking:
                     self.is_parking = True
                     self.start_parking_sequence()
