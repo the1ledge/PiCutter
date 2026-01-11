@@ -1403,7 +1403,8 @@ class MainWindow(QMainWindow):
             self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         dt = time.perf_counter() - t0
         if dt > 0.02:
-             self.log_to_console(f"DEBUG: Slow cam update: {dt*1000:.1f}ms")
+             # self.log_to_console(f"DEBUG: Slow cam update: {dt*1000:.1f}ms")
+             pass
 
     @pyqtSlot(str)
     def handle_camera_error(self, error_message):
