@@ -1,0 +1,6 @@
+[2026-01-11 23:01:11.673] INFO: Loaded settings from GRBLCNC.config
+[2026-01-11 23:01:11.683] INFO: Searching for USB cameras...
+[2026-01-11 23:01:11.683] INFO: No USB cameras found.
+[2026-01-11 23:01:11.685] CAMERA_ERROR: Error: Failed to initialize Picamera2: No module named 'picamera2'
+[2026-01-11 23:01:12.686] CAMERA_ERROR: Error: Failed to initialize Picamera2: No module named 'picamera2'
+[2026-01-11 23:01:12.740] ERROR: Failed to connect - [Errno 13] could not open port /dev/ttyS0: [Errno 13] Permission denied: '/dev/ttyS0'

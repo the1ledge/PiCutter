@@ -5,11 +5,12 @@ PiCutter is a lightweight, touch-friendly CNC control software designed for the 
 ## Features
 
 *   **Touch-Optimized UI:** Large buttons and clean layout designed for 800x480 screens.
-*   **Robust Streaming:** "Ping-Pong" protocol with auto-retry for transient transmission errors.
+*   **Robust Flow Control:** Advanced character-counting streaming with "Smart Recovery" for transient errors (EMI/Noise).
 *   **Camera Support:** Integrated support for Raspberry Pi Camera (libcamera/picamera2) and USB Webcams.
-*   **Smart Resume:** Resume jobs from any line with automatic state restoration (Modes, Spindle, Work Offsets).
+*   **Smart Resume:** Resume jobs from any line with automatic state restoration (Motion Modes, Spindle Speed, Work Offsets, Coolant).
 *   **Advanced Probing:** Built-in macros for Z-Probe and 3-Axis Corner Finding.
-*   **Visual G-Code Check:** Pre-flight checker to identify potential errors before running a job.
+*   **G-Code Checker:** Pre-flight checker (`$C` Check Mode integration) to identify potential errors before running a job.
+*   **Auto-Retry:** Automatically detects transient transmission errors (e.g., "Bad Arc", "Expected Command") and retries the command sequence without ruining the part.
 
 ## Hardware Requirements
 
@@ -20,7 +21,7 @@ PiCutter is a lightweight, touch-friendly CNC control software designed for the 
 
 ## Software Requirements
 
-*   **OS:** Raspberry Pi OS (Legacy/Buster or Bullseye/Bookworm) - **32-bit recommended for compatibility**.
+*   **OS:** Raspberry Pi OS (Legacy/Buster or Bullseye/Bookworm/Trixie) - **32-bit recommended**.
 *   **Python:** Python 3.7+
 
 ## Installation
@@ -36,13 +37,13 @@ PiCutter is a lightweight, touch-friendly CNC control software designed for the 
     ```bash
     sudo apt install python3-pyqt5 python3-pyqt5.qtquick python3-serial python3-opencv libcamera-tools
     ```
-    *(Note: If you are on a very new OS version, you might need to use a virtual environment or `pip` with `--break-system-packages`, but installing via `apt` is preferred for stability on Pi.)*
 
-3.  **Install Python Libraries:**
-    If not installed via apt:
+3.  **Permissions:**
+    Ensure your user (usually `pi` or `cncpi`) has permission to access the serial port (dialout) and video devices.
     ```bash
-    pip3 install pyserial opencv-python-headless
+    sudo usermod -a -G dialout,video $USER
     ```
+    *Log out and back in for changes to take effect.*
 
 4.  **Clone the Repository:**
     ```bash
@@ -64,11 +65,27 @@ PiCutter is a lightweight, touch-friendly CNC control software designed for the 
     QT_QPA_PLATFORM=offscreen python3 src/main.py
     ```
 
-## Troubleshooting
+## Troubleshooting Common Issues
 
-*   **"Slow cam update" Warnings:** The application automatically throttles the camera to 15FPS to save CPU on the Pi 3B. If sluggishness persists, try disabling the camera in Settings.
-*   **Connection Issues:** Use the "View System Log" button in Settings to check `dmesg` for USB cable faults or EMI disconnects.
-*   **Controller Reset:** If the job stops with "Controller Reset Detected", it indicates strong electrical noise (EMI) triggered the controller's reset pin. Check your wiring, shielding, and USB cable quality.
+### "Error 9: G-code Lockout"
+This error occurs when the machine has been in an Alarm state (e.g., after a Limit Switch hit or Soft Reset) and has not fully unlocked before receiving new commands.
+*   **Solution:** The software now includes an extended delay (3 seconds) during recovery to ensure the `$X` (Unlock) command is fully processed. If this persists, manually press "Unlock" before starting.
+
+### "Bad Arc" or "Illegal Target" Errors (EMI/Noise)
+If your G-code file passes "Check Mode" but fails during a cut with random errors like `error:33` (Bad Arc) or `error:1` (Expected Word), you likely have electrical noise (EMI) corrupting the USB data stream.
+*   **Software Fix:** PiCutter's **Auto-Retry** feature will attempt to detect these specific errors, perform a Soft Reset (`\x18`) to clear the corrupted buffer, and resume cutting automatically.
+*   **Hardware Fixes:**
+    *   Use a high-quality **Shielded USB Cable** with ferrite beads.
+    *   Install **Ferrite Cores** on your spindle cable and stepper motor cables.
+    *   Separate your USB cable from high-voltage cables (Spindle/VFD).
+    *   Ensure your machine frame and controller are properly **Grounded**.
+
+### "Slow cam update"
+The application throttles the camera to 15FPS to save CPU on the Pi 3B. If the interface becomes sluggish, disable the camera in the 'Settings' tab.
+
+### Connection Issues
+Use the "View System Log" button in the Settings tab to check `dmesg`.
+*   **`usb 1-1: device descriptor read/64, error -71`**: This confirms serious EMI interference disconnecting the USB device.
 
 ## License
 

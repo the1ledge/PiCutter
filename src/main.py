@@ -813,13 +813,8 @@ class MainWindow(QMainWindow):
 
         top_bar_layout.addLayout(system_buttons_layout)
         main_layout.addLayout(top_bar_layout)
-        self.tabs = QTabWidget()
-        main_layout.addWidget(self.tabs)
-        main_layout.setSpacing(2)
-        self.numpad_enabled_fields = []
-
         # --- Initialization of State Variables and Timers ---
-        # Must occur BEFORE UI construction because load_settings() (called by build_settings_tab)
+        # MOVED TO TOP: Must occur BEFORE UI construction because load_settings() (called by build_settings_tab)
         # accesses self.dro_timer to set the poll interval.
         self.serial_connection = None
         self.serial_thread = None
@@ -877,6 +872,11 @@ class MainWindow(QMainWindow):
         self.check_mode_pulse_state = 0
         self.recovery_mode = False
         self.failed_line_index = 0
+
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+        main_layout.setSpacing(2)
+        self.numpad_enabled_fields = []
 
         # --- UI Construction ---
         if self.splash:
@@ -1541,7 +1541,9 @@ class MainWindow(QMainWindow):
             # Wait a moment for init
             QTimer.singleShot(1000, lambda: self.send_command("$X"))
             # Trigger resume after unlock (we assume unlock works instantly)
-            QTimer.singleShot(1500, lambda: self.resume_gcode_job(self.failed_line_index + 1)) # Resume from the NEXT line? No, the failed line.
+            # INCREASED DELAY to 3000ms (3s) to ensure $X is fully processed before sending G-code
+            # This helps prevent 'error:9' (G-code lockout) if the unlock isn't immediate
+            QTimer.singleShot(3000, lambda: self.resume_gcode_job(self.failed_line_index + 1))
             self.recovery_mode = False
             return
 
@@ -1654,6 +1656,10 @@ class MainWindow(QMainWindow):
 
             # Handle G-code job errors with Auto-Retry
             if self.gcode_is_running:
+                # Stop the sender loop IMMEDIATELY to prevent flooding
+                self.gcode_is_running = False
+                self.gcode_is_paused = False
+
                 # Extract error code
                 try:
                     error_code = int(data.split(':')[1])
@@ -1661,68 +1667,31 @@ class MainWindow(QMainWindow):
                     error_code = -1
 
                 # Retry on transient errors often caused by transmission corruption (EMI/Noise).
+                # 1: Expected G-code word
+                # 2: Bad number format
+                # 3: Invalid statement
+                # 20: Unsupported command
+                # 24: Invalid target
+                # 33: Arc format error (common with noise)
+                # 38: Probe fail (sometimes noise)
                 retryable_errors = [1, 2, 3, 20, 24, 33, 38]
 
                 if error_code in retryable_errors:
                     if self.retry_count < 3:
                         self.retry_count += 1
 
-                        # --- SAFE RECOVERY FOR PIPELINING ---
-                        # We cannot simply retry "in place" because the buffer might contain
-                        # subsequent commands (Line N+1, N+2) that are already queued.
-                        # If we just resend Line N, it will execute AFTER N+1 and N+2.
-                        # This OUT-OF-ORDER execution is dangerous.
+                        self.log_to_console(f"WARNING: Transient error {error_code} detected (Retry {self.retry_count}/3). Initiating Smart Recovery...")
 
-                        # Action: Force a Soft Reset (\x18) to purge the buffer.
-                        # Then use Smart Resume to restart from the failed line.
+                        # Strategy:
+                        # 1. Soft Reset (\x18) to purge the controller's corrupted buffer.
+                        # 2. Wait for the 'Reset' message (handled in the 'Grbl' reset block).
+                        # 3. That block checks 'self.recovery_mode' and triggers 'Smart Resume'.
 
-                        self.log_to_console(f"WARNING: Transient error {error_code} detected. Forcing Soft Reset to purge buffer and retry...")
-
-                        # Calculate the actual failed line index.
-                        # gcode_current_line points to the NEXT line to be sent.
-                        # But we might have multiple lines 'in flight'.
-                        # GRBL errors correspond to the command currently being executed/parsed.
-                        # We assume the error corresponds to the OLDEST pending command.
-                        # (Since we just cleared pending_commands_lengths, we need to estimate)
-                        # Actually, strictly speaking, if an error occurs, GRBL stops processing
-                        # the current line.
-
-                        # We will target the line *before* the current pointer?
-                        # No, wait. 'gcode_current_line' is advanced when we SEND.
-                        # If we sent 100, 101, 102. And 100 fails. current is 103.
-                        # We want to resume at 100.
-                        # BUT we don't know exactly how many were pending when the error hit
-                        # because we just cleared the list.
-                        # We need to rely on the fact that we clear the list *here*.
-                        # Actually, we should capture the list length BEFORE clearing it.
-                        # But we already cleared it above. Let's fix that order.
-                        # Wait, we can't 'fix' the order in this patch block easily without context.
-                        # However, for SAFETY, it is better to repeat a few lines than skip them.
-                        # We should resume from `gcode_current_line - <estimated_depth>`.
-                        # Or, simply use the user's "Start Line" logic which we can set.
-
-                        # Ideally, we track `last_acknowledged_line`.
-                        # Let's use `self.failed_line_index` which we can calculate.
-                        # Since we don't track acknowledged lines precisely in this variable scope,
-                        # we will assume the error happened recently.
-                        # A safe fallback is to rewind by `len(pending_commands_lengths)` (before clear)
-                        # but we lost that info.
-                        # Let's assume a safe rewind of 5 lines? No, that's hacky.
-
-                        # CORRECT FIX: We need to modify the block above to capture the pending count.
-                        # Since I can't see the lines above `elif data.startswith("error:")` in this view,
-                        # I will assume I need to handle it here.
-
-                        # ACTUALLY: The safest valid resume point is the last line that returned 'ok'.
-                        # But we don't track that explicitly as a variable.
-                        # We do emit `gcode_line_executed`.
-                        # Let's use `self.gcode_current_line` and rewind conservatively.
-                        # Since buffer max is 127 bytes, and min line is ~10 bytes, max 12 lines.
-                        # Retrying from `current - 10` is safe (Smart Resume skips executed modal commands,
-                        # but cuts? Double cutting air is safer than missing).
-
-                        # Let's go with a hard reset strategy:
-                        self.failed_line_index = max(0, self.gcode_current_line - 10)
+                        # Rewind the line counter conservatively.
+                        # gcode_current_line is the *next* line to send.
+                        # We rewind 12 lines (approx 128 bytes max buffer / ~10 bytes per line) to be safe.
+                        # Smart Resume handles modal state restoration, so re-sending lines is safe (cutting air).
+                        self.failed_line_index = max(0, self.gcode_current_line - 12)
                         self.recovery_mode = True
 
                         self.serial_connection.write(b'\x18') # Soft Reset
@@ -1731,16 +1700,13 @@ class MainWindow(QMainWindow):
 
                     else:
                          self.log_to_console(f"CRITICAL: Max retries exceeded for error {error_code}.")
-                         self.gcode_is_running = False
-                         self.gcode_is_paused = False
                          self.gcode_job_error.emit(f"Max retries exceeded for error {error_code}. Job halted.")
                          return
 
-                # If not retryable or retries exhausted, HALT.
-                self.serial_connection.write(b'\x18') # Send soft-reset
-                self.serial_connection.flush() # Ensure the halt command is sent immediately.
-                self.log_to_console("CRITICAL: GRBL error during job. Sent immediate soft-reset (\\x18) to halt machine.")
-                # Then, signal the main thread to update the UI and notify the user.
+                # If not retryable or retries exhausted, HALT PERMANENTLY.
+                self.serial_connection.write(b'\x18') # Send soft-reset to kill motion
+                self.serial_connection.flush()
+                self.log_to_console("CRITICAL: Fatal GRBL error during job. Sent soft-reset.")
                 self.gcode_job_error.emit(data)
 
             # Special UI handling for jog errors (can happen outside of a job)
@@ -1756,6 +1722,13 @@ class MainWindow(QMainWindow):
                 else:
                     self.current_alarm_code = code
                     self.machine_state = "Alarm"
+                    # STOP THE JOB IMMEDIATELY ON ALARM
+                    if self.gcode_is_running:
+                        self.gcode_is_running = False
+                        self.gcode_is_paused = False
+                        self.log_to_console("CRITICAL: Alarm detected during job. Halting.")
+                        self.gcode_job_error.emit(f"Machine Alarm Detected: {self.alarm_codes.get(code, 'Unknown')}")
+
                     # Reset any special sequences that might have been running
                     if self.is_parking:
                         self.is_parking = False
