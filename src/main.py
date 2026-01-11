@@ -867,7 +867,6 @@ class MainWindow(QMainWindow):
         self.planner_buffer_blocks = 0
         self.rx_buffer_bytes = 0
         self.dro_timer = QTimer(self)
-        self.dro_timer.setInterval(100) # Faster timer for smoother streaming
         self.dro_timer.timeout.connect(self.request_status_and_send_next)
         self.home_pulse_timer = QTimer(self)
         self.home_pulse_timer.setInterval(500)
@@ -1141,8 +1140,14 @@ class MainWindow(QMainWindow):
         self.baud_combobox.addItems(["9600", "19200", "38400", "57600", "115200"])
         self.baud_combobox.setCurrentText("115200")
         self.refresh_button = QPushButton("Refresh Port List")
+        self.poll_interval_input = QLineEdit("200")
+        self.poll_interval_input.setToolTip("Interval in milliseconds to query status (?). Increase to reduce traffic.")
+        self.numpad_enabled_fields.append(self.poll_interval_input)
+        self.poll_interval_input.installEventFilter(self)
+
         connection_settings_layout.addRow("Port:", self.port_combobox)
         connection_settings_layout.addRow("Baud Rate:", self.baud_combobox)
+        connection_settings_layout.addRow("Poll Interval (ms):", self.poll_interval_input)
         connection_settings_layout.addRow(self.refresh_button)
         connection_settings_group.setLayout(connection_settings_layout)
         left_column_layout.addWidget(connection_settings_group)
@@ -2432,12 +2437,27 @@ class MainWindow(QMainWindow):
         self.camera_type_combo.setCurrentText(self.settings.value("camera/type", "PiCamera"))
         self.usb_camera_combo.setCurrentText(self.settings.value("camera/usb_device", "Camera 0"))
 
+        poll_ms = self.settings.value("connection/poll_interval", "200")
+        self.poll_interval_input.setText(poll_ms)
+        try:
+            self.dro_timer.setInterval(int(poll_ms))
+        except ValueError:
+            self.dro_timer.setInterval(200)
+
 
     def save_settings(self):
         for key,widget in self.get_settings_widgets().items(): self.settings.setValue(key, widget.text())
         self.settings.setValue("gcode/park_on_finish", self.park_on_finish_checkbox.isChecked())
         self.settings.setValue("camera/type", self.camera_type_combo.currentText())
         self.settings.setValue("camera/usb_device", self.usb_camera_combo.currentText())
+
+        poll_val = self.poll_interval_input.text()
+        self.settings.setValue("connection/poll_interval", poll_val)
+        try:
+            self.dro_timer.setInterval(int(poll_val))
+        except ValueError:
+            pass # Keep existing interval
+
         for setting,field in self.get_grbl_fields().items():
             if field.text() != self.initial_grbl_settings.get(setting,''): self.send_command(f"{setting}={field.text()}")
         self.log_to_console("INFO: Settings saved.")
