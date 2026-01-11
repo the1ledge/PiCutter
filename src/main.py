@@ -1541,9 +1541,13 @@ class MainWindow(QMainWindow):
             if buffer_match:
                 self.planner_buffer_blocks = int(buffer_match.group(1))
                 self.rx_buffer_bytes = int(buffer_match.group(2))
-                # Note: We intentionally do NOT trigger send_next_gcode_line() here.
-                # To maintain strict Ping-Pong protocol and prevent race conditions or buffer overflows,
-                # we must ONLY advance on 'ok' responses.
+
+                # If we were throttled (Bf < 3), and now space has opened up (Bf >= 3),
+                # we must attempt to send the next line.
+                # This call is safe because send_next_gcode_line() checks self.command_pending internally.
+                # If an 'ok' hasn't arrived yet, command_pending will be True, and this will safely return.
+                if self.gcode_is_running:
+                    self.send_next_gcode_line()
 
             if data.startswith("<Home"):
                 self.home_pulse_timer.stop()
@@ -2321,8 +2325,15 @@ class MainWindow(QMainWindow):
             if self.gcode_current_line < len(self.gcode_lines):
                 # Simple Ping-Pong Flow Control:
                 # 1. Check if we are waiting for an 'ok' from a previous command.
-                # This ensures we never overflow the buffer and eliminates timing issues with status reports.
                 if self.command_pending:
+                    return
+
+                # 2. Planner Buffer Throttling:
+                # To prevent saturation (Bf:0), we pause sending if the planner has fewer than 3 blocks free.
+                # The user requested to "stop sending if it is at three" (meaning 3 or fewer slots free).
+                # We resume only when space clears up (Bf >= 3).
+                if self.planner_buffer_blocks < 3:
+                    # self.log_to_console(f"DEBUG: Throttling. Planner buffer low: {self.planner_buffer_blocks}")
                     return
 
                 cmd = self.gcode_lines[self.gcode_current_line]
