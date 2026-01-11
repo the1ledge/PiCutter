@@ -1623,6 +1623,22 @@ class MainWindow(QMainWindow):
                         self.retry_count += 1
                         self.log_to_console(f"WARNING: Transient error {error_code} detected. Retrying line {self.gcode_current_line} (Attempt {self.retry_count}/3)...")
 
+                        # --- SMART RECOVERY: Restore Modal State ---
+                        # If the error was due to noise flipping the machine mode (e.g. G20 vs G21, G90 vs G91),
+                        # we must restore the correct state before retrying the move.
+                        # We use the existing Smart Resume logic to build a state header for the *current* line.
+                        # The 'current line' index points to the NEXT command to be sent, so we want the state
+                        # up to the command that just failed (current - 1).
+                        target_idx = max(0, self.gcode_current_line - 1)
+                        if self.gcode_lines and target_idx < len(self.gcode_lines):
+                            state_header = self.get_resume_state_header(target_idx)
+                            if state_header:
+                                self.log_to_console(f"INFO: Injecting state recovery header: {state_header}")
+                                # Send header immediately (bypassing normal queue to ensure it executes before retry)
+                                self.serial_connection.write((state_header + '\n').encode('utf-8'))
+                                # We don't wait for 'ok' for this recovery header to keep the logic simple;
+                                # GRBL will process it. If it also fails, the retry loop continues.
+
                         # Rewind one line to resend the last command
                         if self.gcode_current_line > 0:
                             self.gcode_current_line -= 1
