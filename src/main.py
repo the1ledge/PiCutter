@@ -106,7 +106,7 @@ def _splash_carve_step():
         QTimer.singleShot(1000, _reveal_done)
 
 # Start the carving timer with a short interval to show progress while startup work runs
-_splash_carve_timer.setInterval(40)
+_splash_carve_timer.setInterval(100) # Throttled to 10Hz for Pi 3B+
 _splash_carve_timer.timeout.connect(_splash_carve_step)
 _splash_carve_timer.start()
 
@@ -154,7 +154,7 @@ class USBCameraWorker(QThread):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/30) # Limit frame rate
+            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
 
         if self.cap:
             self.cap.release()
@@ -190,7 +190,7 @@ class CameraWorker(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/30)
+            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
         if self.picam2:
             # The close() method should handle stopping the camera activities.
             # Calling stop() separately can cause race conditions with the
@@ -664,16 +664,28 @@ class MainWindow(QMainWindow):
         # Initialize Console Buffer and Regexes EARLY (before any logging happens)
         self.console_buffer = []
         self.console_update_timer = QTimer(self)
-        self.console_update_timer.setInterval(200) # Update console every 200ms
+        self.console_update_timer.setInterval(500) # Update console every 500ms for performance
         self.console_update_timer.timeout.connect(self.flush_console_buffer)
         self.console_update_timer.start()
 
-        # UI Throttling Timer (10Hz)
+        # Initialize Session Log File
+        self.log_file_path = os.path.join(os.path.dirname(__file__), "picutter_session.log")
+        try:
+            with open(self.log_file_path, 'a') as f:
+                f.write(f"\n--- SESSION STARTED: {time.ctime()} ---\n")
+        except Exception:
+            pass
+
+        # UI Throttling Timer (5Hz)
         self.gcode_table_dirty = False
         self.ui_update_timer = QTimer(self)
-        self.ui_update_timer.setInterval(100)
+        self.ui_update_timer.setInterval(200)
         self.ui_update_timer.timeout.connect(self.process_ui_updates)
         self.ui_update_timer.start()
+
+        # Scaling state for camera feed optimization
+        self.last_video_label_size = None
+        self.last_gcode_video_label_size = None
 
         # Pre-compile regex for performance
         self.re_comment_paren = re.compile(r'\(.*?\)')
@@ -867,7 +879,7 @@ class MainWindow(QMainWindow):
         self.planner_buffer_blocks = 0
         self.rx_buffer_bytes = 0
         self.dro_timer = QTimer(self)
-        self.dro_timer.setInterval(100) # Faster timer for smoother streaming
+        self.dro_timer.setInterval(250) # Throttled to 4Hz for Pi 3B+ stability
         self.dro_timer.timeout.connect(self.request_status_and_send_next)
         self.home_pulse_timer = QTimer(self)
         self.home_pulse_timer.setInterval(500)
@@ -1384,13 +1396,20 @@ class MainWindow(QMainWindow):
             return
         pixmap = QPixmap.fromImage(image)
         if hasattr(self, 'video_label') and self.video_label.isVisible():
+            label_size = self.video_label.size()
+            if self.last_video_label_size != label_size:
+                # Cache aspect ratio calculation or just scale on size change
+                self.last_video_label_size = label_size
             w = max(1, min(self.video_label.width(), self.video_label.maximumWidth()))
             h = max(1, min(self.video_label.height(), self.video_label.maximumHeight()))
-            self.video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.FastTransformation))
         if hasattr(self, 'gcode_video_label') and self.gcode_video_label.isVisible():
+            label_size = self.gcode_video_label.size()
+            if self.last_gcode_video_label_size != label_size:
+                self.last_gcode_video_label_size = label_size
             w = max(1, min(self.gcode_video_label.width(), self.gcode_video_label.maximumWidth()))
             h = max(1, min(self.gcode_video_label.height(), self.gcode_video_label.maximumHeight()))
-            self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.FastTransformation))
         dt = time.perf_counter() - t0
         if dt > 0.02:
              self.log_to_console(f"DEBUG: Slow cam update: {dt*1000:.1f}ms")
@@ -1458,6 +1477,13 @@ class MainWindow(QMainWindow):
         # Join buffered messages and insert at once
         text_chunk = '\n'.join(self.console_buffer) + '\n'
         self.console_buffer = [] # Clear buffer
+
+        # Write to log file
+        try:
+            with open(self.log_file_path, 'a') as f:
+                f.write(text_chunk)
+        except Exception:
+            pass
 
         self.console_output.moveCursor(QTextCursor.Start)
         self.console_output.insertPlainText(text_chunk)
@@ -1572,8 +1598,11 @@ class MainWindow(QMainWindow):
                 self.serial_connection.write(b'\x18') # Send soft-reset
                 self.serial_connection.flush() # Ensure the halt command is sent immediately.
                 self.log_to_console("CRITICAL: GRBL error during job. Sent immediate soft-reset (\\x18) to halt machine.")
-                # Then, signal the main thread to update the UI and notify the user.
-                self.gcode_job_error.emit(data)
+                
+                # Add a 3-second delay for $X recovery as per README/Discrepancy fix
+                self.log_to_console("INFO: Waiting 3 seconds for GRBL to stabilize before allowing unlock/resume...")
+                QTimer.singleShot(3000, lambda: self.gcode_job_error.emit(data))
+                return
 
             # Special UI handling for jog errors (can happen outside of a job)
             if "error:15" in data and self.last_jog_button:
