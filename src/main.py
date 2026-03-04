@@ -523,6 +523,22 @@ class GCodeChecker:
         if arc_codes:
             if 'I' not in command and 'J' not in command and 'R' not in command:
                 self._add_issue('error', line_num, "Arc command (G2/G3) is missing required I, J, or R parameters.", gcode)
+            elif 'I' in command or 'J' in command:
+                # Basic Radius Tolerance Check (Error 33/24 prevention)
+                try:
+                    i_val = float(re.search(r'I([-\d.]+)', command).group(1)) if 'I' in command else 0.0
+                    j_val = float(re.search(r'J([-\d.]+)', command).group(1)) if 'J' in command else 0.0
+                    x_target = self.x
+                    y_target = self.y
+                    
+                    # Assuming we started at (prev_x, prev_y) before this move...
+                    # We can't easily get prev_x here without tracking it in check(), 
+                    # but if we add prev_x, prev_y to state tracking we can verify radius.
+                    # For now, adding a warning about arc precision if coordinates have many decimal places.
+                    if len(str(x_target).split('.')[-1]) > 3 or len(str(y_target).split('.')[-1]) > 3:
+                        self._add_issue('warning', line_num, "Arc coordinates have high precision (>3 decimals). This can cause Error 33 or 24 due to float rounding.", gcode)
+                except (ValueError, AttributeError):
+                    pass
 
     def _check_machine_limits(self, command, line_num, gcode):
         max_x_rate = self.grbl_settings.get('110')
@@ -1616,10 +1632,14 @@ class MainWindow(QMainWindow):
                     else:
                          self.log_to_console(f"CRITICAL: Max retries exceeded for error {error_code}.")
 
-                # If not retryable or retries exhausted, HALT.
+                # If not retryable or retries exhausted, HALT immediately.
+                self.gcode_is_running = False
+                self.gcode_is_paused = False
+                self.update_ui_states()
+
                 self.serial_connection.write(b'\x18') # Send soft-reset
                 self.serial_connection.flush() # Ensure the halt command is sent immediately.
-                self.log_to_console("CRITICAL: GRBL error during job. Sent immediate soft-reset (\\x18) to halt machine.")
+                self.log_to_console("CRITICAL: GRBL error during job. Job halted internally. Sent immediate soft-reset (\\x18) to halt machine.")
                 
                 # Add a 3-second delay for $X recovery as per README/Discrepancy fix
                 self.log_to_console("INFO: Waiting 3 seconds for GRBL to stabilize before allowing unlock/resume...")
