@@ -794,6 +794,15 @@ class MainWindow(QMainWindow):
                 background-color: #ffffff;
                 border: 1px solid black;
             }
+            QGroupBox {
+                margin-top: 1ex;
+                font-size: 9pt;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top center;
+                padding: 0 3px;
+            }
         """
         self.setStyleSheet(stylesheet)
 
@@ -846,6 +855,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
         main_layout.setSpacing(2)
+        main_layout.setContentsMargins(2, 2, 2, 2)
         self.numpad_enabled_fields = []
         if self.splash:
             self.splash.showMessage("Building UI components...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
@@ -931,6 +941,7 @@ class MainWindow(QMainWindow):
         manual_tab = QWidget()
         self.tabs.addTab(manual_tab, "Manual Control")
         main_layout = QHBoxLayout(manual_tab)
+        main_layout.setContentsMargins(2, 2, 2, 2)
         self.home_button = QPushButton("Home ($H)")
         self.run_probe_button = QPushButton("Auto Zero Z")
         self.run_3axis_probe_button = QPushButton("3-Axis\nAuto Zero")
@@ -946,9 +957,9 @@ class MainWindow(QMainWindow):
         self.spindle_speed_input.setMaximumWidth(100)
         self.numpad_enabled_fields.append(self.spindle_speed_input)
         self.spindle_speed_input.installEventFilter(self)
-        self.spindle_off_button.setMinimumWidth(150)
+        self.spindle_off_button.setMinimumSize(120, 28)
         self.spindle_off_button.setMaximumWidth(150)
-        self.spindle_on_button.setMinimumWidth(150)
+        self.spindle_on_button.setMinimumSize(120, 28)
         self.spindle_on_button.setMaximumWidth(150)
         spindle_layout.addRow("Spindle Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
@@ -959,8 +970,8 @@ class MainWindow(QMainWindow):
         self.video_label = QLabel("Initializing Camera...")
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet("border: 1px solid black; background-color: #333; color: white;")
-        self.video_label.setMinimumSize(320, 240)
-        self.video_label.setMaximumSize(640, 480)
+        self.video_label.setMinimumSize(240, 180)
+        self.video_label.setMaximumSize(400, 300)
         self.video_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.video_label.setScaledContents(False)
         video_layout.addWidget(self.video_label)
@@ -987,8 +998,8 @@ class MainWindow(QMainWindow):
         wpos_dro_layout.addRow("Z:", self.wpos_z_label)
         wpos_dro_group.setLayout(wpos_dro_layout)
         middle_column_layout.addWidget(wpos_dro_group)
-        self.set_location_button.setMinimumHeight(48)
-        self.go_to_location_button.setMinimumHeight(48)
+        self.set_location_button.setMinimumHeight(32)
+        self.go_to_location_button.setMinimumHeight(32)
         middle_column_layout.addWidget(self.set_location_button)
         middle_column_layout.addWidget(self.go_to_location_button)
         middle_column_layout.addStretch(1)
@@ -1002,13 +1013,13 @@ class MainWindow(QMainWindow):
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         self.step_size_combo.setMinimumWidth(40)
-        self.step_size_combo.setMinimumHeight(40)
+        self.step_size_combo.setMinimumHeight(28)
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
         jog_buttons = [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]
         for button in jog_buttons:
-            button.setMinimumSize(60, 60)
+            button.setMinimumSize(48, 48)
         step_control_layout = QVBoxLayout()
         step_control_layout.setSpacing(0)
         step_label = QLabel("Step")
@@ -1037,7 +1048,7 @@ class MainWindow(QMainWindow):
         self.run_3axis_probe_button.setObjectName("threeAxisAutoZeroButton")
         action_buttons = [self.home_button, self.run_probe_button, self.run_3axis_probe_button]
         for button in action_buttons:
-            button.setMinimumSize(60, 60)
+            button.setMinimumSize(48, 48)
         actions_layout.addWidget(self.home_button, 0, 0)
         actions_layout.addWidget(self.run_probe_button, 0, 1)
         actions_layout.addWidget(self.run_3axis_probe_button, 0, 2)
@@ -1049,6 +1060,7 @@ class MainWindow(QMainWindow):
         gcode_tab = QWidget()
         self.tabs.addTab(gcode_tab, "G-Code Sender")
         main_gcode_layout = QHBoxLayout(gcode_tab)
+        main_gcode_layout.setContentsMargins(2, 2, 2, 2)
         left_panel_layout = QVBoxLayout()
         gcode_group = QGroupBox()
         gcode_group_layout = QVBoxLayout()
@@ -1135,6 +1147,7 @@ class MainWindow(QMainWindow):
     def build_console_tab(self):
         console_tab = QWidget()
         console_layout = QVBoxLayout(console_tab)
+        console_layout.setContentsMargins(2, 2, 2, 2)
         self.tabs.addTab(console_tab, "Console")
         input_layout = QHBoxLayout()
         self.command_input = QLineEdit()
@@ -1157,6 +1170,7 @@ class MainWindow(QMainWindow):
         settings_tab = QWidget()
         self.tabs.addTab(settings_tab, "Settings")
         tab_layout = QVBoxLayout(settings_tab)
+        tab_layout.setContentsMargins(2, 2, 2, 2)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         tab_layout.addWidget(scroll_area)
