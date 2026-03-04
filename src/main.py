@@ -1171,6 +1171,13 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(settings_tab, "Settings")
         tab_layout = QVBoxLayout(settings_tab)
         tab_layout.setContentsMargins(2, 2, 2, 2)
+        tab_layout.setSpacing(2)
+        
+        save_button = QPushButton("Save All Settings")
+        save_button.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 5px;")
+        save_button.clicked.connect(self.save_settings)
+        tab_layout.addWidget(save_button)
+
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         tab_layout.addWidget(scroll_area)
@@ -1233,7 +1240,6 @@ class MainWindow(QMainWindow):
         grbl_group = QGroupBox("GRBL Settings")
         self.grbl_layout = QGridLayout()
         self.grbl_layout.setColumnMinimumWidth(1, 70)
-        self.grbl_layout.setColumnMinimumWidth(3, 70)
         read_button = QPushButton("Read Settings From Machine")
         read_button.clicked.connect(lambda: self.send_command("$$"))
         save_to_file_button = QPushButton("Save to File")
@@ -1242,10 +1248,7 @@ class MainWindow(QMainWindow):
         self.grbl_layout.addWidget(save_to_file_button, 0, 2, 1, 2)
         grbl_group.setLayout(self.grbl_layout)
         layout.addWidget(left_column_widget, 1)
-        layout.addWidget(grbl_group, 2)
-        save_button = QPushButton("Save All Settings")
-        save_button.clicked.connect(self.save_settings)
-        tab_layout.addWidget(save_button)
+        layout.addWidget(grbl_group, 3)
         self.load_settings()
         self.ensure_config_file_exists()
         self.load_grbl_config_file()
@@ -2499,10 +2502,9 @@ class MainWindow(QMainWindow):
             field.installEventFilter(self)
             # Connect the textChanged signal to the handler
             field.textChanged.connect(lambda text, s=setting: self.on_grbl_setting_changed(s, text))
-            row = (self.grbl_settings_count // 2) + 1
-            col = self.grbl_settings_count % 2
-            self.grbl_layout.addWidget(label, row, col * 2)
-            self.grbl_layout.addWidget(field, row, col * 2 + 1)
+            row = self.grbl_settings_count + 1
+            self.grbl_layout.addWidget(label, row, 0)
+            self.grbl_layout.addWidget(field, row, 1)
             self.grbl_setting_widgets[setting] = field
             self.numpad_enabled_fields.append(field)
             self.grbl_settings_count += 1
