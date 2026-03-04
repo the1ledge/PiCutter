@@ -106,7 +106,7 @@ def _splash_carve_step():
         QTimer.singleShot(1000, _reveal_done)
 
 # Start the carving timer with a short interval to show progress while startup work runs
-_splash_carve_timer.setInterval(40)
+_splash_carve_timer.setInterval(100) # Throttled to 10Hz for Pi 3B+
 _splash_carve_timer.timeout.connect(_splash_carve_step)
 _splash_carve_timer.start()
 
@@ -154,7 +154,7 @@ class USBCameraWorker(QThread):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/30) # Limit frame rate
+            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
 
         if self.cap:
             self.cap.release()
@@ -190,7 +190,7 @@ class CameraWorker(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/30)
+            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
         if self.picam2:
             # The close() method should handle stopping the camera activities.
             # Calling stop() separately can cause race conditions with the
@@ -523,6 +523,22 @@ class GCodeChecker:
         if arc_codes:
             if 'I' not in command and 'J' not in command and 'R' not in command:
                 self._add_issue('error', line_num, "Arc command (G2/G3) is missing required I, J, or R parameters.", gcode)
+            elif 'I' in command or 'J' in command:
+                # Basic Radius Tolerance Check (Error 33/24 prevention)
+                try:
+                    i_val = float(re.search(r'I([-\d.]+)', command).group(1)) if 'I' in command else 0.0
+                    j_val = float(re.search(r'J([-\d.]+)', command).group(1)) if 'J' in command else 0.0
+                    x_target = self.x
+                    y_target = self.y
+                    
+                    # Assuming we started at (prev_x, prev_y) before this move...
+                    # We can't easily get prev_x here without tracking it in check(), 
+                    # but if we add prev_x, prev_y to state tracking we can verify radius.
+                    # For now, adding a warning about arc precision if coordinates have many decimal places.
+                    if len(str(x_target).split('.')[-1]) > 3 or len(str(y_target).split('.')[-1]) > 3:
+                        self._add_issue('warning', line_num, "Arc coordinates have high precision (>3 decimals). This can cause Error 33 or 24 due to float rounding.", gcode)
+                except (ValueError, AttributeError):
+                    pass
 
     def _check_machine_limits(self, command, line_num, gcode):
         max_x_rate = self.grbl_settings.get('110')
@@ -607,6 +623,7 @@ class SerialWorker(QObject):
                     line = self.serial_connection.readline().decode('utf-8').strip()
                     if line: self.serial_data_received.emit(line)
                 except serial.SerialException: break
+                except UnicodeDecodeError: continue # Skip corrupted bytes from EMI noise
     def stop(self): self._is_running = False
 
 class MainWindow(QMainWindow):
@@ -664,16 +681,29 @@ class MainWindow(QMainWindow):
         # Initialize Console Buffer and Regexes EARLY (before any logging happens)
         self.console_buffer = []
         self.console_update_timer = QTimer(self)
-        self.console_update_timer.setInterval(200) # Update console every 200ms
+        self.console_update_timer.setInterval(500) # Update console every 500ms for performance
         self.console_update_timer.timeout.connect(self.flush_console_buffer)
         self.console_update_timer.start()
 
-        # UI Throttling Timer (10Hz)
+        # Initialize Session Log File
+        self.log_file_path = os.path.join(os.path.dirname(__file__), "picutter_session.log")
+        self.log_file = None
+        try:
+            self.log_file = open(self.log_file_path, 'a', buffering=1) # Line-buffered for stability
+            self.log_file.write(f"\n--- SESSION STARTED: {time.ctime()} ---\n")
+        except Exception:
+            pass
+
+        # UI Throttling Timer (5Hz)
         self.gcode_table_dirty = False
         self.ui_update_timer = QTimer(self)
-        self.ui_update_timer.setInterval(100)
+        self.ui_update_timer.setInterval(200)
         self.ui_update_timer.timeout.connect(self.process_ui_updates)
         self.ui_update_timer.start()
+
+        # Scaling state for camera feed optimization
+        self.last_video_label_size = None
+        self.last_gcode_video_label_size = None
 
         # Pre-compile regex for performance
         self.re_comment_paren = re.compile(r'\(.*?\)')
@@ -864,10 +894,12 @@ class MainWindow(QMainWindow):
         self.gcode_line_times = np.array([], dtype=np.float32)
         self.job_elapsed_time = 0.0
         self.command_pending = False
+        self.retry_count = 0
+        self.is_recovering_transient_error = False
         self.planner_buffer_blocks = 0
         self.rx_buffer_bytes = 0
         self.dro_timer = QTimer(self)
-        self.dro_timer.setInterval(100) # Faster timer for smoother streaming
+        self.dro_timer.setInterval(250) # Throttled to 4Hz for Pi 3B+ stability
         self.dro_timer.timeout.connect(self.request_status_and_send_next)
         self.home_pulse_timer = QTimer(self)
         self.home_pulse_timer.setInterval(500)
@@ -1384,16 +1416,37 @@ class MainWindow(QMainWindow):
             return
         pixmap = QPixmap.fromImage(image)
         if hasattr(self, 'video_label') and self.video_label.isVisible():
+            label_size = self.video_label.size()
+            if self.last_video_label_size != label_size:
+                # Cache aspect ratio calculation or just scale on size change
+                self.last_video_label_size = label_size
             w = max(1, min(self.video_label.width(), self.video_label.maximumWidth()))
             h = max(1, min(self.video_label.height(), self.video_label.maximumHeight()))
-            self.video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.FastTransformation))
         if hasattr(self, 'gcode_video_label') and self.gcode_video_label.isVisible():
+            label_size = self.gcode_video_label.size()
+            if self.last_gcode_video_label_size != label_size:
+                self.last_gcode_video_label_size = label_size
             w = max(1, min(self.gcode_video_label.width(), self.gcode_video_label.maximumWidth()))
             h = max(1, min(self.gcode_video_label.height(), self.gcode_video_label.maximumHeight()))
-            self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.gcode_video_label.setPixmap(pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.FastTransformation))
         dt = time.perf_counter() - t0
         if dt > 0.02:
              self.log_to_console(f"DEBUG: Slow cam update: {dt*1000:.1f}ms")
+
+    @pyqtSlot(str)
+    def handle_grbl_welcome(self):
+        """Called when GRBL welcome banner is detected."""
+        self.command_pending = False
+        if self.gcode_is_running and self.is_recovering_transient_error:
+            self.is_recovering_transient_error = False
+            # Rewind to the failed line
+            if self.gcode_current_line > 0:
+                self.gcode_current_line -= 1
+            header = self.get_resume_state_header(self.gcode_current_line)
+            self.log_to_console(f"INFO: GRBL Reset. Auto-recovering state: {header}")
+            self.send_command(header)
+            # The 'ok' from this header will trigger the next G-code line.
 
     @pyqtSlot(str)
     def handle_camera_error(self, error_message):
@@ -1434,10 +1487,13 @@ class MainWindow(QMainWindow):
         self.camera_thread.start()
 
     def stop_camera(self):
-        if self.camera_worker: self.camera_worker.stop()
+        if self.camera_worker: 
+            self.camera_worker.stop()
+            self.camera_worker = None
         if self.camera_thread:
             self.camera_thread.quit()
             self.camera_thread.wait()
+            self.camera_thread = None
 
     def log_to_console(self, message):
         # Check if UI elements are initialized before accessing them
@@ -1459,14 +1515,21 @@ class MainWindow(QMainWindow):
         text_chunk = '\n'.join(self.console_buffer) + '\n'
         self.console_buffer = [] # Clear buffer
 
+        # Write to log file
+        if self.log_file:
+            try:
+                self.log_file.write(text_chunk)
+            except Exception:
+                pass
+
         self.console_output.moveCursor(QTextCursor.Start)
         self.console_output.insertPlainText(text_chunk)
 
-        # Enforce limit (batch cleanup)
+        # Enforce limit (batch cleanup) - Throttled for Pi 3B+
         doc = self.console_output.document()
         block_count = doc.blockCount()
-        if block_count > 500:
-            cursor = QTextCursor(doc.findBlockByNumber(500))
+        if block_count > 350: # Trigger at 350, trim to 300
+            cursor = QTextCursor(doc.findBlockByNumber(300))
             cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
             cursor.removeSelectedText()
 
@@ -1540,12 +1603,15 @@ class MainWindow(QMainWindow):
             elif self.gcode_is_running and not self.gcode_is_paused:
                 # Emit a signal to update the UI from the main thread
                 self.gcode_line_executed.emit(self.gcode_current_line - 1)
+                self.retry_count = 0 # Fix 4: Reset retry count on successful line execution
                 self.send_next_gcode_line()
+        elif "grbl" in data.lower() and "for help" in data.lower():
+            self.handle_grbl_welcome()
         elif data.startswith("error:"):
             self.log_to_console(f"DEBUG: Received '{data}', clearing command_pending.")
             self.command_pending = False
 
-            # Handle G-code job errors with Auto-Retry
+            # Handle G-code job errors with Auto-Retry (Smart Recovery)
             if self.gcode_is_running:
                 # Extract error code
                 try:
@@ -1558,22 +1624,27 @@ class MainWindow(QMainWindow):
                 if error_code in [1, 2, 3]:
                     if self.retry_count < 3:
                         self.retry_count += 1
-                        self.log_to_console(f"WARNING: Transient error {error_code} detected. Retrying line {self.gcode_current_line} (Attempt {self.retry_count}/3)...")
-
-                        # Rewind one line to resend the last command
-                        if self.gcode_current_line > 0:
-                            self.gcode_current_line -= 1
-                            self.send_next_gcode_line()
+                        self.log_to_console(f"WARNING: Transient error {error_code} detected. Reseting GRBL for Smart Recovery (Attempt {self.retry_count}/3)...")
+                        self.is_recovering_transient_error = True
+                        self.serial_connection.write(b'\x18') # Fix 3: Send soft-reset before retry to clear buffers
+                        self.serial_connection.flush()
                         return
                     else:
                          self.log_to_console(f"CRITICAL: Max retries exceeded for error {error_code}.")
 
-                # If not retryable or retries exhausted, HALT.
+                # If not retryable or retries exhausted, HALT immediately.
+                self.gcode_is_running = False
+                self.gcode_is_paused = False
+                self.update_ui_states()
+
                 self.serial_connection.write(b'\x18') # Send soft-reset
                 self.serial_connection.flush() # Ensure the halt command is sent immediately.
-                self.log_to_console("CRITICAL: GRBL error during job. Sent immediate soft-reset (\\x18) to halt machine.")
-                # Then, signal the main thread to update the UI and notify the user.
-                self.gcode_job_error.emit(data)
+                self.log_to_console("CRITICAL: GRBL error during job. Job halted internally. Sent immediate soft-reset (\\x18) to halt machine.")
+                
+                # Add a 3-second delay for $X recovery as per README/Discrepancy fix
+                self.log_to_console("INFO: Waiting 3 seconds for GRBL to stabilize before allowing unlock/resume...")
+                QTimer.singleShot(3000, lambda: self.gcode_job_error.emit(data))
+                return
 
             # Special UI handling for jog errors (can happen outside of a job)
             if "error:15" in data and self.last_jog_button:
@@ -2155,8 +2226,12 @@ class MainWindow(QMainWindow):
 
     def emergency_stop(self):
         self.send_command("\x18")
-        self.gcode_is_running=self.gcode_is_paused=self.gcode_current_line=0
-        self.gcode_progress.setValue(0); self.gcode_progress.setFormat("%p%")
+        self.gcode_is_running = False
+        self.gcode_is_paused = False
+        self.gcode_current_line = 0
+        self.command_pending = False # Reset pending status to prevent lockout after E-stop
+        self.gcode_progress.setValue(0)
+        self.gcode_progress.setFormat("%p%")
         self.update_ui_states()
 
     def spindle_on(self):
@@ -2257,16 +2332,22 @@ class MainWindow(QMainWindow):
             self.log_to_console(f"INFO: Not connected. Cmd '{command}' not sent.")
             return False
 
-        if self.command_pending and command not in ['?', '!', '~', '\x18']:
+        is_realtime = command in ['?', '!', '~', '\x18', '\x91', '\x92']
+
+        if self.command_pending and not is_realtime:
             self.log_to_console(f"DEBUG: Command '{command}' blocked, command_pending is True.")
             return False
 
         self.log_to_console(f"TX: {command}")
-        self.serial_connection.write((command + '\n').encode('utf-8'))
-
-        if command not in ['?', '!', '~', '\x18']:
+        
+        # Real-time commands must NOT have newlines.
+        # Sending '?\n' every 250ms overflows the 128-byte RX buffer during long moves.
+        # When it overflows, characters drop (usually newlines), merging two G-code lines into one (Error 24).
+        if is_realtime:
+            self.serial_connection.write(command.encode('utf-8'))
+        else:
+            self.serial_connection.write((command + '\n').encode('utf-8'))
             self.command_pending = True
-            # self.log_to_console(f"DEBUG: Set command_pending=True for '{command}'")
 
         return True
 
@@ -2288,10 +2369,40 @@ class MainWindow(QMainWindow):
         port, baud = self.port_combobox.currentText(), int(self.baud_combobox.currentText())
         if not port: return
         try:
-            self.serial_connection=serial.Serial(port,baud,timeout=1); time.sleep(2); self.serial_connection.write(b"\r\n\r\n"); self.serial_connection.flushInput(); self.serial_thread=QThread(); self.serial_worker=SerialWorker(self.serial_connection); self.serial_worker.moveToThread(self.serial_thread); self.serial_thread.started.connect(self.serial_worker.run); self.serial_worker.serial_data_received.connect(self.handle_serial_data); self.serial_thread.start(); self.dro_timer.start(); self.connect_button.setText("Disconnect"); self.update_connection_indicator(True)
-            self.send_command("$$")
+            self.serial_connection = serial.Serial(port, baud, timeout=1)
+            self.update_connection_indicator(False)
+            self.connect_button.setText("Connecting...")
+            # Fix 2: Defer initialization to a timer to avoid 2s UI freeze
+            QTimer.singleShot(2000, self._finalize_connection)
         except (serial.SerialException, FileNotFoundError) as e:
-            self.log_to_console(f"ERROR: Failed to connect - {e}"); self.update_connection_indicator(False)
+            self.log_to_console(f"ERROR: Failed to connect - {e}")
+            self.update_connection_indicator(False)
+            self.connect_button.setText("Connect")
+        self.update_ui_states()
+
+    def _finalize_connection(self):
+        """Complete the connection process after the hardware reset delay."""
+        if not self.serial_connection or not self.serial_connection.is_open:
+            return
+        
+        try:
+            self.serial_connection.write(b"\r\n\r\n")
+            self.serial_connection.flushInput()
+            
+            self.serial_thread = QThread()
+            self.serial_worker = SerialWorker(self.serial_connection)
+            self.serial_worker.moveToThread(self.serial_thread)
+            self.serial_thread.started.connect(self.serial_worker.run)
+            self.serial_worker.serial_data_received.connect(self.handle_serial_data)
+            self.serial_thread.start()
+            
+            self.dro_timer.start()
+            self.connect_button.setText("Disconnect")
+            self.update_connection_indicator(True)
+            self.send_command("$$")
+        except Exception as e:
+            self.log_to_console(f"ERROR: Finalizing connection failed: {e}")
+            self.disconnect_serial()
         self.update_ui_states()
 
     def disconnect_serial(self):
@@ -2506,7 +2617,14 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, 'Confirm Shutdown', "Are you sure?", QMessageBox.Yes|QMessageBox.No, QMessageBox.No)==QMessageBox.Yes: os.system("sudo shutdown -h now")
 
     def closeEvent(self, event):
-        self.stop_camera(); self.disconnect_serial(); super().closeEvent(event)
+        self.stop_camera()
+        self.disconnect_serial()
+        if hasattr(self, 'log_file') and self.log_file:
+            try:
+                self.log_file.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.FocusIn and isinstance(obj, QLineEdit) and obj in self.numpad_enabled_fields:
