@@ -2332,16 +2332,22 @@ class MainWindow(QMainWindow):
             self.log_to_console(f"INFO: Not connected. Cmd '{command}' not sent.")
             return False
 
-        if self.command_pending and command not in ['?', '!', '~', '\x18']:
+        is_realtime = command in ['?', '!', '~', '\x18', '\x91', '\x92']
+
+        if self.command_pending and not is_realtime:
             self.log_to_console(f"DEBUG: Command '{command}' blocked, command_pending is True.")
             return False
 
         self.log_to_console(f"TX: {command}")
-        self.serial_connection.write((command + '\n').encode('utf-8'))
-
-        if command not in ['?', '!', '~', '\x18']:
+        
+        # Real-time commands must NOT have newlines.
+        # Sending '?\n' every 250ms overflows the 128-byte RX buffer during long moves.
+        # When it overflows, characters drop (usually newlines), merging two G-code lines into one (Error 24).
+        if is_realtime:
+            self.serial_connection.write(command.encode('utf-8'))
+        else:
+            self.serial_connection.write((command + '\n').encode('utf-8'))
             self.command_pending = True
-            # self.log_to_console(f"DEBUG: Set command_pending=True for '{command}'")
 
         return True
 
