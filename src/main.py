@@ -121,7 +121,7 @@ import cv2
 import math
 import numpy as np
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSizePolicy
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSizePolicy, QScroller
 )
 from PyQt5.QtCore import QThread, QObject, pyqtSignal, QSettings, QEvent, pyqtSlot
 from PyQt5.QtGui import QTextCursor, QImage
@@ -297,6 +297,7 @@ class GCodeCheckDialog(QDialog):
         layout.addWidget(info_label)
 
         self.results_text = QTextEdit()
+        QScroller.grabGesture(self.results_text.viewport(), QScroller.LeftMouseButtonGesture)
         self.results_text.setReadOnly(True)
         self.results_text.setLineWrapMode(QTextEdit.NoWrap)
 
@@ -795,13 +796,22 @@ class MainWindow(QMainWindow):
                 border: 1px solid black;
             }
             QGroupBox {
-                margin-top: 1ex;
+                border: 1px solid #c0c0c0;
+                border-radius: 4px;
+                margin-top: 15px;
+                padding-top: 10px;
                 font-size: 9pt;
+                font-weight: bold;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                subcontrol-position: top center;
-                padding: 0 3px;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
+            }
+            QPushButton:pressed {
+                background-color: #555555;
+                border: 2px inset #333333;
             }
         """
         self.setStyleSheet(stylesheet)
@@ -980,7 +990,7 @@ class MainWindow(QMainWindow):
         left_column_layout.addStretch(1)
         main_layout.addLayout(left_column_layout)
         middle_column_layout = QVBoxLayout()
-        middle_column_layout.setSpacing(2)
+        middle_column_layout.setSpacing(5)
         middle_column_layout.setAlignment(Qt.AlignTop)
         dro_group = QGroupBox("Machine Pos")
         dro_layout = QFormLayout()
@@ -1007,9 +1017,8 @@ class MainWindow(QMainWindow):
         right_column_layout = QVBoxLayout()
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
-        jog_layout.setSpacing(10)
+        jog_layout.setSpacing(5)
         jog_group.setLayout(jog_layout)
-        jog_group.layout().setContentsMargins(2, 2, 2, 2)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         self.step_size_combo.setMinimumWidth(40)
@@ -1041,7 +1050,7 @@ class MainWindow(QMainWindow):
         actions_group = QGroupBox()
         actions_group.setObjectName("actionsGroup")
         actions_layout = QGridLayout()
-        actions_layout.setSpacing(10)
+        actions_layout.setSpacing(5)
         actions_group.setLayout(actions_layout)
         self.home_button.setObjectName("homeButton")
         self.run_probe_button.setObjectName("autoZeroZButton")
@@ -1103,6 +1112,7 @@ class MainWindow(QMainWindow):
         gcode_group.setLayout(gcode_group_layout)
         left_panel_layout.addWidget(gcode_group)
         self.gcode_table = QTableWidget()
+        QScroller.grabGesture(self.gcode_table.viewport(), QScroller.LeftMouseButtonGesture)
         self.gcode_table.setColumnCount(3)
         self.gcode_table.setHorizontalHeaderLabels(["Line #", "Command", "Status"])
         self.gcode_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -1163,6 +1173,7 @@ class MainWindow(QMainWindow):
         input_layout.addStretch(1)
         console_layout.addLayout(input_layout)
         self.console_output = QTextEdit()
+        QScroller.grabGesture(self.console_output.viewport(), QScroller.LeftMouseButtonGesture)
         self.console_output.setReadOnly(True)
         console_layout.addWidget(self.console_output, 1)
 
@@ -1179,6 +1190,7 @@ class MainWindow(QMainWindow):
         tab_layout.addWidget(save_button)
 
         scroll_area = QScrollArea()
+        QScroller.grabGesture(scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
         scroll_area.setWidgetResizable(True)
         tab_layout.addWidget(scroll_area)
         content_widget = QWidget()
