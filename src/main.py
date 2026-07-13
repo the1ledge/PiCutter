@@ -154,7 +154,7 @@ class USBCameraWorker(QThread):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
+            time.sleep(0.1) # Limit frame rate to 10FPS to prioritize CNC performance
 
         if self.cap:
             self.cap.release()
@@ -190,7 +190,7 @@ class CameraWorker(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
+            time.sleep(0.1) # Limit frame rate to 10FPS to prioritize CNC performance
         if self.picam2:
             # The close() method should handle stopping the camera activities.
             # Calling stop() separately can cause race conditions with the
@@ -423,6 +423,7 @@ class GCodeChecker:
         self.issues = []
         self.x, self.y, self.z = 0.0, 0.0, 0.0
         self.is_absolute_mode = True
+        self.current_motion_mode = 'G0'
         feed_rate_set = False
 
         # Pre-compile regex for checker
@@ -454,11 +455,15 @@ class GCodeChecker:
             # --- Update position for motion commands ---
             motion_codes = re_motion_codes.findall(command)
             if motion_codes:
-                # Safely parse axis values
-                x_match = re_x.search(command)
-                y_match = re_y.search(command)
-                z_match = re_z.search(command)
+                self.current_motion_mode = motion_codes[-1]
 
+            x_match = re_x.search(command)
+            y_match = re_y.search(command)
+            z_match = re_z.search(command)
+
+            is_motion = bool(motion_codes or x_match or y_match or z_match)
+
+            if is_motion:
                 x_val = float(x_match.group(1)) if x_match else None
                 y_val = float(y_match.group(1)) if y_match else None
                 z_val = float(z_match.group(1)) if z_match else None
@@ -511,8 +516,10 @@ class GCodeChecker:
         motion_codes = re.findall(r'\b(G1|G2|G3)\b', command)
         arc_codes = re.findall(r'\b(G2|G3)\b', command)
 
+        is_cutting_motion = bool(motion_codes) or (self.current_motion_mode in ['G1', 'G2', 'G3'] and ('X' in command or 'Y' in command or 'Z' in command))
+
         # Check for motion before feed rate
-        if motion_codes and not feed_rate_set:
+        if is_cutting_motion and not feed_rate_set:
             # We need to ensure a motion command isn't just part of another word.
             # This check is now more precise.
             # However, we must ignore this check if the line also contains M3 or M5 (spindle commands)
@@ -592,8 +599,10 @@ class GCodeChecker:
         if 'M7' in command or 'M8' in command:
             self._add_issue('warning', line_num, "Coolant command (M7/M8) detected. This will be ignored if your machine does not support it.", gcode)
 
+        is_g0 = ('G0' in command) or (self.current_motion_mode == 'G0' and ('X' in command or 'Y' in command or 'Z' in command))
+
         # Warn on rapid Z-moves at low height
-        if re.search(r'\bG0\b', command) and 'Z' in command:
+        if is_g0 and 'Z' in command:
             z_match = re.search(r'Z([-\d.]+)', command)
             if z_match:
                 z_val = float(z_match.group(1))
@@ -602,7 +611,7 @@ class GCodeChecker:
                      self._add_issue('warning', line_num, "Rapid move (G0) includes a Z-axis movement to a low height. This can be risky over previously cut areas.", gcode)
 
         # Warn on long rapid XY travel without Z retraction
-        if re.search(r'\bG0\b', command) and ('X' in command or 'Y' in command) and 'Z' not in command:
+        if is_g0 and ('X' in command or 'Y' in command) and 'Z' not in command:
             # This is a simplified check. A better implementation would track previous positions.
             # This is tricky because we already updated the position. We need the previous position.
             # For simplicity, we'll just check if the current Z is low during a long move.
@@ -689,8 +698,19 @@ class MainWindow(QMainWindow):
         # Initialize Session Log File
         self.log_file_path = os.path.join(os.path.dirname(__file__), "picutter_session.log")
         self.log_file = None
+        
+        # Rotate log if it exceeds 10MB
         try:
-            self.log_file = open(self.log_file_path, 'a', buffering=1) # Line-buffered for stability
+            if os.path.exists(self.log_file_path) and os.path.getsize(self.log_file_path) > 10 * 1024 * 1024:
+                old_log_path = os.path.join(os.path.dirname(__file__), "picutter_session_old.log")
+                if os.path.exists(old_log_path):
+                    os.remove(old_log_path)
+                os.rename(self.log_file_path, old_log_path)
+        except Exception:
+            pass
+
+        try:
+            self.log_file = open(self.log_file_path, 'a') # Block-buffered for SD card lifespan and performance
             self.log_file.write(f"\n--- SESSION STARTED: {time.ctime()} ---\n")
         except Exception:
             pass
@@ -1214,7 +1234,10 @@ class MainWindow(QMainWindow):
         probe_group = QGroupBox("Probe Settings")
         probe_layout = QFormLayout()
         self.probe_dist_input, self.probe_feed_input, self.probe_thickness_input = QLineEdit(), QLineEdit(), QLineEdit()
-        self.slow_probe_feed_input, self.probe_retract_input, self.tool_radius_input = QLineEdit(), QLineEdit(), QLineEdit()
+        self.slow_probe_feed_input, self.probe_retract_input = QLineEdit(), QLineEdit()
+        self.tool_radius_input = QComboBox()
+        self.tool_radius_input.setEditable(True)
+        self.tool_radius_input.addItems(["3.175 (1/4\" Endmill)", "1.5875 (1/8\" Endmill)", "0.79375 (1/16\" Endmill)"])
         probe_layout.addRow("Probe Travel (mm):", self.probe_dist_input)
         probe_layout.addRow("Fast Probe Feed Rate:", self.probe_feed_input)
         probe_layout.addRow("Slow Probe Feed Rate:", self.slow_probe_feed_input)
@@ -1812,7 +1835,7 @@ class MainWindow(QMainWindow):
         avg_pos = sum(self.probe_results) / len(self.probe_results)
         try:
             thickness = float(self.settings.value("probe/thickness", 1.0))
-            radius = float(self.settings.value("probe/tool_radius", 3.15))
+            radius = float(str(self.settings.value("probe/tool_radius", "3.175")).split()[0])
         except (ValueError, TypeError):
             QMessageBox.critical(self, "Probe Error", "Invalid probe settings.")
             self.end_probe_cycle()
@@ -1824,13 +1847,13 @@ class MainWindow(QMainWindow):
                 self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}", f"G90 G0 Z{thickness + 10}"]
                 self.xyz_probe_stage = 'DONE'
             else:
-                self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}","G91 G0 Z10","G91 G0 X-25"]
+                self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}","G91 G0 Z10","G91 G0 X-15"]
                 self.xyz_probe_stage = 'X_TRANSITION'
             self.send_next_probe_command()
         elif self.xyz_probe_stage == 'X':
             offset = avg_pos + radius
             self.log_to_console(f"INFO: X-Probe successful. Avg: {avg_pos:.4f}mm. Setting X-WCO.")
-            self.probe_command_queue = [f"G10 L2 P1 X{offset:.4f}","G91 G0 X-30","G91 G0 Y-25"]
+            self.probe_command_queue = [f"G10 L2 P1 X{offset:.4f}","G91 G0 X-10","G91 G0 Y-25"]
             self.xyz_probe_stage = 'Y_TRANSITION'
             self.send_next_probe_command()
         elif self.xyz_probe_stage == 'Y':
@@ -1895,7 +1918,7 @@ class MainWindow(QMainWindow):
         p_dist = dist if axis == 'Z' else abs(dist)
         r_dist = retract if axis == 'Z' else -retract
         probe_commands=[f"G91 G38.2 {axis}{p_dist} F{fast_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}"]
-        self.probe_command_queue = ["G91 G0 X45"] + probe_commands if axis == 'Y' else probe_commands
+        self.probe_command_queue = ["G91 G0 X25"] + probe_commands if axis == 'Y' else probe_commands
         self.send_next_probe_command()
 
     def run_homing_cycle(self):
@@ -2398,7 +2421,7 @@ class MainWindow(QMainWindow):
         port, baud = self.port_combobox.currentText(), int(self.baud_combobox.currentText())
         if not port: return
         try:
-            self.serial_connection = serial.Serial(port, baud, timeout=1)
+            self.serial_connection = serial.Serial(port, baud, timeout=0.1)
             self.update_connection_indicator(False)
             self.connect_button.setText("Connecting...")
             # Fix 2: Defer initialization to a timer to avoid 2s UI freeze
