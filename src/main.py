@@ -121,7 +121,7 @@ import cv2
 import math
 import numpy as np
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSizePolicy
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QGroupBox, QGridLayout, QProgressBar, QFileDialog, QTextEdit, QLineEdit, QTabWidget, QMessageBox, QFormLayout, QCheckBox, QDialog, QDialogButtonBox, QScrollArea, QToolTip, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QSizePolicy, QScroller
 )
 from PyQt5.QtCore import QThread, QObject, pyqtSignal, QSettings, QEvent, pyqtSlot
 from PyQt5.QtGui import QTextCursor, QImage
@@ -154,7 +154,7 @@ class USBCameraWorker(QThread):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
+            time.sleep(0.1) # Limit frame rate to 10FPS to prioritize CNC performance
 
         if self.cap:
             self.cap.release()
@@ -190,7 +190,7 @@ class CameraWorker(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
-            time.sleep(1/15) # Limit frame rate to 15FPS for Pi 3B+
+            time.sleep(0.1) # Limit frame rate to 10FPS to prioritize CNC performance
         if self.picam2:
             # The close() method should handle stopping the camera activities.
             # Calling stop() separately can cause race conditions with the
@@ -297,6 +297,7 @@ class GCodeCheckDialog(QDialog):
         layout.addWidget(info_label)
 
         self.results_text = QTextEdit()
+        QScroller.grabGesture(self.results_text.viewport(), QScroller.LeftMouseButtonGesture)
         self.results_text.setReadOnly(True)
         self.results_text.setLineWrapMode(QTextEdit.NoWrap)
 
@@ -422,6 +423,7 @@ class GCodeChecker:
         self.issues = []
         self.x, self.y, self.z = 0.0, 0.0, 0.0
         self.is_absolute_mode = True
+        self.current_motion_mode = 'G0'
         feed_rate_set = False
 
         # Pre-compile regex for checker
@@ -453,11 +455,15 @@ class GCodeChecker:
             # --- Update position for motion commands ---
             motion_codes = re_motion_codes.findall(command)
             if motion_codes:
-                # Safely parse axis values
-                x_match = re_x.search(command)
-                y_match = re_y.search(command)
-                z_match = re_z.search(command)
+                self.current_motion_mode = motion_codes[-1]
 
+            x_match = re_x.search(command)
+            y_match = re_y.search(command)
+            z_match = re_z.search(command)
+
+            is_motion = bool(motion_codes or x_match or y_match or z_match)
+
+            if is_motion:
                 x_val = float(x_match.group(1)) if x_match else None
                 y_val = float(y_match.group(1)) if y_match else None
                 z_val = float(z_match.group(1)) if z_match else None
@@ -510,8 +516,10 @@ class GCodeChecker:
         motion_codes = re.findall(r'\b(G1|G2|G3)\b', command)
         arc_codes = re.findall(r'\b(G2|G3)\b', command)
 
+        is_cutting_motion = bool(motion_codes) or (self.current_motion_mode in ['G1', 'G2', 'G3'] and ('X' in command or 'Y' in command or 'Z' in command))
+
         # Check for motion before feed rate
-        if motion_codes and not feed_rate_set:
+        if is_cutting_motion and not feed_rate_set:
             # We need to ensure a motion command isn't just part of another word.
             # This check is now more precise.
             # However, we must ignore this check if the line also contains M3 or M5 (spindle commands)
@@ -591,8 +599,10 @@ class GCodeChecker:
         if 'M7' in command or 'M8' in command:
             self._add_issue('warning', line_num, "Coolant command (M7/M8) detected. This will be ignored if your machine does not support it.", gcode)
 
+        is_g0 = ('G0' in command) or (self.current_motion_mode == 'G0' and ('X' in command or 'Y' in command or 'Z' in command))
+
         # Warn on rapid Z-moves at low height
-        if re.search(r'\bG0\b', command) and 'Z' in command:
+        if is_g0 and 'Z' in command:
             z_match = re.search(r'Z([-\d.]+)', command)
             if z_match:
                 z_val = float(z_match.group(1))
@@ -601,7 +611,7 @@ class GCodeChecker:
                      self._add_issue('warning', line_num, "Rapid move (G0) includes a Z-axis movement to a low height. This can be risky over previously cut areas.", gcode)
 
         # Warn on long rapid XY travel without Z retraction
-        if re.search(r'\bG0\b', command) and ('X' in command or 'Y' in command) and 'Z' not in command:
+        if is_g0 and ('X' in command or 'Y' in command) and 'Z' not in command:
             # This is a simplified check. A better implementation would track previous positions.
             # This is tricky because we already updated the position. We need the previous position.
             # For simplicity, we'll just check if the current Z is low during a long move.
@@ -688,8 +698,19 @@ class MainWindow(QMainWindow):
         # Initialize Session Log File
         self.log_file_path = os.path.join(os.path.dirname(__file__), "picutter_session.log")
         self.log_file = None
+        
+        # Rotate log if it exceeds 10MB
         try:
-            self.log_file = open(self.log_file_path, 'a', buffering=1) # Line-buffered for stability
+            if os.path.exists(self.log_file_path) and os.path.getsize(self.log_file_path) > 10 * 1024 * 1024:
+                old_log_path = os.path.join(os.path.dirname(__file__), "picutter_session_old.log")
+                if os.path.exists(old_log_path):
+                    os.remove(old_log_path)
+                os.rename(self.log_file_path, old_log_path)
+        except Exception:
+            pass
+
+        try:
+            self.log_file = open(self.log_file_path, 'a') # Block-buffered for SD card lifespan and performance
             self.log_file.write(f"\n--- SESSION STARTED: {time.ctime()} ---\n")
         except Exception:
             pass
@@ -794,6 +815,24 @@ class MainWindow(QMainWindow):
                 background-color: #ffffff;
                 border: 1px solid black;
             }
+            QGroupBox {
+                border: 1px solid #c0c0c0;
+                border-radius: 4px;
+                margin-top: 15px;
+                padding-top: 10px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
+            }
+            QPushButton:pressed {
+                background-color: #555555;
+                border: 2px inset #333333;
+            }
         """
         self.setStyleSheet(stylesheet)
 
@@ -846,6 +885,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
         main_layout.setSpacing(2)
+        main_layout.setContentsMargins(2, 2, 2, 2)
         self.numpad_enabled_fields = []
         if self.splash:
             self.splash.showMessage("Building UI components...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
@@ -931,6 +971,7 @@ class MainWindow(QMainWindow):
         manual_tab = QWidget()
         self.tabs.addTab(manual_tab, "Manual Control")
         main_layout = QHBoxLayout(manual_tab)
+        main_layout.setContentsMargins(2, 2, 2, 2)
         self.home_button = QPushButton("Home ($H)")
         self.run_probe_button = QPushButton("Auto Zero Z")
         self.run_3axis_probe_button = QPushButton("3-Axis\nAuto Zero")
@@ -946,9 +987,9 @@ class MainWindow(QMainWindow):
         self.spindle_speed_input.setMaximumWidth(100)
         self.numpad_enabled_fields.append(self.spindle_speed_input)
         self.spindle_speed_input.installEventFilter(self)
-        self.spindle_off_button.setMinimumWidth(150)
+        self.spindle_off_button.setMinimumSize(120, 28)
         self.spindle_off_button.setMaximumWidth(150)
-        self.spindle_on_button.setMinimumWidth(150)
+        self.spindle_on_button.setMinimumSize(120, 28)
         self.spindle_on_button.setMaximumWidth(150)
         spindle_layout.addRow("Spindle Speed (RPM):", self.spindle_speed_input)
         spindle_layout.addRow(self.spindle_on_button, self.spindle_off_button)
@@ -959,8 +1000,8 @@ class MainWindow(QMainWindow):
         self.video_label = QLabel("Initializing Camera...")
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet("border: 1px solid black; background-color: #333; color: white;")
-        self.video_label.setMinimumSize(320, 240)
-        self.video_label.setMaximumSize(640, 480)
+        self.video_label.setMinimumSize(240, 180)
+        self.video_label.setMaximumSize(400, 300)
         self.video_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.video_label.setScaledContents(False)
         video_layout.addWidget(self.video_label)
@@ -969,7 +1010,7 @@ class MainWindow(QMainWindow):
         left_column_layout.addStretch(1)
         main_layout.addLayout(left_column_layout)
         middle_column_layout = QVBoxLayout()
-        middle_column_layout.setSpacing(2)
+        middle_column_layout.setSpacing(5)
         middle_column_layout.setAlignment(Qt.AlignTop)
         dro_group = QGroupBox("Machine Pos")
         dro_layout = QFormLayout()
@@ -987,8 +1028,8 @@ class MainWindow(QMainWindow):
         wpos_dro_layout.addRow("Z:", self.wpos_z_label)
         wpos_dro_group.setLayout(wpos_dro_layout)
         middle_column_layout.addWidget(wpos_dro_group)
-        self.set_location_button.setMinimumHeight(48)
-        self.go_to_location_button.setMinimumHeight(48)
+        self.set_location_button.setMinimumHeight(32)
+        self.go_to_location_button.setMinimumHeight(32)
         middle_column_layout.addWidget(self.set_location_button)
         middle_column_layout.addWidget(self.go_to_location_button)
         middle_column_layout.addStretch(1)
@@ -996,19 +1037,18 @@ class MainWindow(QMainWindow):
         right_column_layout = QVBoxLayout()
         jog_group = QGroupBox("Jogging")
         jog_layout = QGridLayout()
-        jog_layout.setSpacing(10)
+        jog_layout.setSpacing(5)
         jog_group.setLayout(jog_layout)
-        jog_group.layout().setContentsMargins(2, 2, 2, 2)
         self.step_size_combo = QComboBox()
         self.step_size_combo.addItems(["0.1", "1", "10", "100"])
         self.step_size_combo.setMinimumWidth(40)
-        self.step_size_combo.setMinimumHeight(40)
+        self.step_size_combo.setMinimumHeight(28)
         self.y_plus_button, self.y_minus_button = QPushButton("Y+"), QPushButton("Y-")
         self.x_minus_button, self.x_plus_button = QPushButton("X-"), QPushButton("X+")
         self.z_plus_button, self.z_minus_button = QPushButton("Z+"), QPushButton("Z-")
         jog_buttons = [self.y_plus_button, self.y_minus_button, self.x_minus_button, self.x_plus_button, self.z_plus_button, self.z_minus_button]
         for button in jog_buttons:
-            button.setMinimumSize(60, 60)
+            button.setMinimumSize(48, 48)
         step_control_layout = QVBoxLayout()
         step_control_layout.setSpacing(0)
         step_label = QLabel("Step")
@@ -1030,14 +1070,14 @@ class MainWindow(QMainWindow):
         actions_group = QGroupBox()
         actions_group.setObjectName("actionsGroup")
         actions_layout = QGridLayout()
-        actions_layout.setSpacing(10)
+        actions_layout.setSpacing(5)
         actions_group.setLayout(actions_layout)
         self.home_button.setObjectName("homeButton")
         self.run_probe_button.setObjectName("autoZeroZButton")
         self.run_3axis_probe_button.setObjectName("threeAxisAutoZeroButton")
         action_buttons = [self.home_button, self.run_probe_button, self.run_3axis_probe_button]
         for button in action_buttons:
-            button.setMinimumSize(60, 60)
+            button.setMinimumSize(48, 48)
         actions_layout.addWidget(self.home_button, 0, 0)
         actions_layout.addWidget(self.run_probe_button, 0, 1)
         actions_layout.addWidget(self.run_3axis_probe_button, 0, 2)
@@ -1049,6 +1089,7 @@ class MainWindow(QMainWindow):
         gcode_tab = QWidget()
         self.tabs.addTab(gcode_tab, "G-Code Sender")
         main_gcode_layout = QHBoxLayout(gcode_tab)
+        main_gcode_layout.setContentsMargins(2, 2, 2, 2)
         left_panel_layout = QVBoxLayout()
         gcode_group = QGroupBox()
         gcode_group_layout = QVBoxLayout()
@@ -1091,6 +1132,7 @@ class MainWindow(QMainWindow):
         gcode_group.setLayout(gcode_group_layout)
         left_panel_layout.addWidget(gcode_group)
         self.gcode_table = QTableWidget()
+        QScroller.grabGesture(self.gcode_table.viewport(), QScroller.LeftMouseButtonGesture)
         self.gcode_table.setColumnCount(3)
         self.gcode_table.setHorizontalHeaderLabels(["Line #", "Command", "Status"])
         self.gcode_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -1135,6 +1177,7 @@ class MainWindow(QMainWindow):
     def build_console_tab(self):
         console_tab = QWidget()
         console_layout = QVBoxLayout(console_tab)
+        console_layout.setContentsMargins(2, 2, 2, 2)
         self.tabs.addTab(console_tab, "Console")
         input_layout = QHBoxLayout()
         self.command_input = QLineEdit()
@@ -1150,6 +1193,7 @@ class MainWindow(QMainWindow):
         input_layout.addStretch(1)
         console_layout.addLayout(input_layout)
         self.console_output = QTextEdit()
+        QScroller.grabGesture(self.console_output.viewport(), QScroller.LeftMouseButtonGesture)
         self.console_output.setReadOnly(True)
         console_layout.addWidget(self.console_output, 1)
 
@@ -1157,7 +1201,16 @@ class MainWindow(QMainWindow):
         settings_tab = QWidget()
         self.tabs.addTab(settings_tab, "Settings")
         tab_layout = QVBoxLayout(settings_tab)
+        tab_layout.setContentsMargins(2, 2, 2, 2)
+        tab_layout.setSpacing(2)
+        
+        save_button = QPushButton("Save All Settings")
+        save_button.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 5px;")
+        save_button.clicked.connect(self.save_settings)
+        tab_layout.addWidget(save_button)
+
         scroll_area = QScrollArea()
+        QScroller.grabGesture(scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
         scroll_area.setWidgetResizable(True)
         tab_layout.addWidget(scroll_area)
         content_widget = QWidget()
@@ -1181,7 +1234,10 @@ class MainWindow(QMainWindow):
         probe_group = QGroupBox("Probe Settings")
         probe_layout = QFormLayout()
         self.probe_dist_input, self.probe_feed_input, self.probe_thickness_input = QLineEdit(), QLineEdit(), QLineEdit()
-        self.slow_probe_feed_input, self.probe_retract_input, self.tool_radius_input = QLineEdit(), QLineEdit(), QLineEdit()
+        self.slow_probe_feed_input, self.probe_retract_input = QLineEdit(), QLineEdit()
+        self.tool_radius_input = QComboBox()
+        self.tool_radius_input.setEditable(True)
+        self.tool_radius_input.addItems(["3.175 (1/4\" Endmill)", "1.5875 (1/8\" Endmill)", "0.79375 (1/16\" Endmill)"])
         probe_layout.addRow("Probe Travel (mm):", self.probe_dist_input)
         probe_layout.addRow("Fast Probe Feed Rate:", self.probe_feed_input)
         probe_layout.addRow("Slow Probe Feed Rate:", self.slow_probe_feed_input)
@@ -1219,7 +1275,6 @@ class MainWindow(QMainWindow):
         grbl_group = QGroupBox("GRBL Settings")
         self.grbl_layout = QGridLayout()
         self.grbl_layout.setColumnMinimumWidth(1, 70)
-        self.grbl_layout.setColumnMinimumWidth(3, 70)
         read_button = QPushButton("Read Settings From Machine")
         read_button.clicked.connect(lambda: self.send_command("$$"))
         save_to_file_button = QPushButton("Save to File")
@@ -1228,10 +1283,7 @@ class MainWindow(QMainWindow):
         self.grbl_layout.addWidget(save_to_file_button, 0, 2, 1, 2)
         grbl_group.setLayout(self.grbl_layout)
         layout.addWidget(left_column_widget, 1)
-        layout.addWidget(grbl_group, 2)
-        save_button = QPushButton("Save All Settings")
-        save_button.clicked.connect(self.save_settings)
-        tab_layout.addWidget(save_button)
+        layout.addWidget(grbl_group, 3)
         self.load_settings()
         self.ensure_config_file_exists()
         self.load_grbl_config_file()
@@ -1783,7 +1835,7 @@ class MainWindow(QMainWindow):
         avg_pos = sum(self.probe_results) / len(self.probe_results)
         try:
             thickness = float(self.settings.value("probe/thickness", 1.0))
-            radius = float(self.settings.value("probe/tool_radius", 3.15))
+            radius = float(str(self.settings.value("probe/tool_radius", "3.175")).split()[0])
         except (ValueError, TypeError):
             QMessageBox.critical(self, "Probe Error", "Invalid probe settings.")
             self.end_probe_cycle()
@@ -1795,13 +1847,13 @@ class MainWindow(QMainWindow):
                 self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}", f"G90 G0 Z{thickness + 10}"]
                 self.xyz_probe_stage = 'DONE'
             else:
-                self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}","G91 G0 Z10","G91 G0 X-25"]
+                self.probe_command_queue = [f"G10 L2 P1 Z{offset:.4f}","G91 G0 Z10","G91 G0 X-15"]
                 self.xyz_probe_stage = 'X_TRANSITION'
             self.send_next_probe_command()
         elif self.xyz_probe_stage == 'X':
             offset = avg_pos + radius
             self.log_to_console(f"INFO: X-Probe successful. Avg: {avg_pos:.4f}mm. Setting X-WCO.")
-            self.probe_command_queue = [f"G10 L2 P1 X{offset:.4f}","G91 G0 X-30","G91 G0 Y-25"]
+            self.probe_command_queue = [f"G10 L2 P1 X{offset:.4f}","G91 G0 X-10","G91 G0 Y-25"]
             self.xyz_probe_stage = 'Y_TRANSITION'
             self.send_next_probe_command()
         elif self.xyz_probe_stage == 'Y':
@@ -1866,7 +1918,7 @@ class MainWindow(QMainWindow):
         p_dist = dist if axis == 'Z' else abs(dist)
         r_dist = retract if axis == 'Z' else -retract
         probe_commands=[f"G91 G38.2 {axis}{p_dist} F{fast_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}",f"G91 G38.2 {axis}{p_dist} F{slow_feed}",f"G91 G0 {axis}{r_dist}"]
-        self.probe_command_queue = ["G91 G0 X45"] + probe_commands if axis == 'Y' else probe_commands
+        self.probe_command_queue = ["G91 G0 X25"] + probe_commands if axis == 'Y' else probe_commands
         self.send_next_probe_command()
 
     def run_homing_cycle(self):
@@ -2369,7 +2421,7 @@ class MainWindow(QMainWindow):
         port, baud = self.port_combobox.currentText(), int(self.baud_combobox.currentText())
         if not port: return
         try:
-            self.serial_connection = serial.Serial(port, baud, timeout=1)
+            self.serial_connection = serial.Serial(port, baud, timeout=0.1)
             self.update_connection_indicator(False)
             self.connect_button.setText("Connecting...")
             # Fix 2: Defer initialization to a timer to avoid 2s UI freeze
@@ -2485,10 +2537,9 @@ class MainWindow(QMainWindow):
             field.installEventFilter(self)
             # Connect the textChanged signal to the handler
             field.textChanged.connect(lambda text, s=setting: self.on_grbl_setting_changed(s, text))
-            row = (self.grbl_settings_count // 2) + 1
-            col = self.grbl_settings_count % 2
-            self.grbl_layout.addWidget(label, row, col * 2)
-            self.grbl_layout.addWidget(field, row, col * 2 + 1)
+            row = self.grbl_settings_count + 1
+            self.grbl_layout.addWidget(label, row, 0)
+            self.grbl_layout.addWidget(field, row, 1)
             self.grbl_setting_widgets[setting] = field
             self.numpad_enabled_fields.append(field)
             self.grbl_settings_count += 1
