@@ -2505,15 +2505,20 @@ class MainWindow(QMainWindow):
             self.usb_camera_combo.setEnabled(True)
 
     def load_settings(self):
-        defaults={"probe/distance":"-25","probe/feedrate":"25","probe/thickness":"1.0","probe/slow_feedrate":"10","probe/retract_dist":"2","probe/tool_radius":"3.15"}
-        for key,widget in self.get_settings_widgets().items(): widget.setText(self.settings.value(key, defaults.get(key)))
+        defaults={"probe/distance":"-25","probe/feedrate":"25","probe/thickness":"1.0","probe/slow_feedrate":"10","probe/retract_dist":"2","probe/tool_radius":"3.175 (1/4\" Endmill)"}
+        for key,widget in self.get_settings_widgets().items():
+            val = self.settings.value(key, defaults.get(key))
+            if isinstance(widget, QComboBox): widget.setCurrentText(str(val))
+            else: widget.setText(str(val))
         self.park_on_finish_checkbox.setChecked(self.settings.value("gcode/park_on_finish", True, type=bool))
         self.camera_type_combo.setCurrentText(self.settings.value("camera/type", "PiCamera"))
         self.usb_camera_combo.setCurrentText(self.settings.value("camera/usb_device", "Camera 0"))
 
 
     def save_settings(self):
-        for key,widget in self.get_settings_widgets().items(): self.settings.setValue(key, widget.text())
+        for key,widget in self.get_settings_widgets().items():
+            if isinstance(widget, QComboBox): self.settings.setValue(key, widget.currentText())
+            else: self.settings.setValue(key, widget.text())
         self.settings.setValue("gcode/park_on_finish", self.park_on_finish_checkbox.isChecked())
         self.settings.setValue("camera/type", self.camera_type_combo.currentText())
         self.settings.setValue("camera/usb_device", self.usb_camera_combo.currentText())
