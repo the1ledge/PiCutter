@@ -837,6 +837,20 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(stylesheet)
 
         self.settings = QSettings("MyCompany", "PiGRBLCNC")
+        
+        # --- Tool Management State ---
+        self.current_tool = 1
+        self.reference_z = None
+        self.is_reference_set = False
+        self.tool_change_x = float(self.settings.value("tool_change_x", 0.0) or 0.0)
+        self.tool_change_y = float(self.settings.value("tool_change_y", 0.0) or 0.0)
+        self.probe_x = float(self.settings.value("probe_x", 0.0) or 0.0)
+        self.probe_y = float(self.settings.value("probe_y", 0.0) or 0.0)
+        self.tool_dict = {}
+        for i in range(1, 9):
+            self.tool_dict[i] = self.settings.value(f"tool_name_{i}", f"Tool {i}")
+        # -----------------------------
+        
         self.camera_thread = None
         self.camera_worker = None
         central_widget = QWidget()
@@ -891,6 +905,7 @@ class MainWindow(QMainWindow):
             self.splash.showMessage("Building UI components...", Qt.AlignBottom | Qt.AlignLeft, Qt.black)
             QApplication.processEvents()
         self.build_manual_control_tab()
+        self.build_tool_management_tab()
         self.build_gcode_tab()
         self.build_console_tab()
         self.build_settings_tab()
@@ -1084,6 +1099,146 @@ class MainWindow(QMainWindow):
         right_column_layout.addWidget(actions_group)
         right_column_layout.addStretch(1)
         main_layout.addLayout(right_column_layout)
+
+    def build_tool_management_tab(self):
+        tool_tab = QWidget()
+        layout = QVBoxLayout(tool_tab)
+        
+        # Tool Library Group
+        lib_group = QGroupBox("Tool Library")
+        lib_layout = QGridLayout(lib_group)
+        self.tool_name_inputs = {}
+        for i in range(1, 9):
+            row = (i - 1) % 4
+            col = ((i - 1) // 4) * 2
+            lbl = QLabel(f"Tool {i}:")
+            inp = QLineEdit(self.tool_dict.get(i, f"Tool {i}"))
+            inp.editingFinished.connect(lambda idx=i, edit=inp: self.save_tool_name(idx, edit.text()))
+            lib_layout.addWidget(lbl, row, col)
+            lib_layout.addWidget(inp, row, col + 1)
+            self.tool_name_inputs[i] = inp
+        layout.addWidget(lib_group)
+        
+        # Probe & Change Locations Group
+        loc_group = QGroupBox("Tool Change Locations")
+        loc_layout = QGridLayout(loc_group)
+        
+        self.lbl_probe_loc = QLabel(f"Probe Location: X: {self.probe_x:.3f}, Y: {self.probe_y:.3f}")
+        btn_capture_probe = QPushButton("Capture Position as Probe Location")
+        btn_capture_probe.clicked.connect(self.capture_probe_location)
+        
+        self.lbl_change_loc = QLabel(f"Swap Position: X: {self.tool_change_x:.3f}, Y: {self.tool_change_y:.3f}")
+        btn_capture_change = QPushButton("Capture Position as Swap Location")
+        btn_capture_change.clicked.connect(self.capture_tool_change_location)
+        
+        loc_layout.addWidget(self.lbl_probe_loc, 0, 0)
+        loc_layout.addWidget(btn_capture_probe, 0, 1)
+        loc_layout.addWidget(self.lbl_change_loc, 1, 0)
+        loc_layout.addWidget(btn_capture_change, 1, 1)
+        layout.addWidget(loc_group)
+        
+        # Actions Group
+        action_group = QGroupBox("Tool Change Actions")
+        action_layout = QHBoxLayout(action_group)
+        
+        btn_set_ref = QPushButton("Set Reference Tool (Tool 1)")
+        btn_set_ref.setStyleSheet("background-color: #2196F3; color: white;")
+        btn_set_ref.clicked.connect(self.start_set_reference_tool)
+        
+        btn_manual_swap = QPushButton("Manual Tool Swap")
+        btn_manual_swap.clicked.connect(self.start_manual_tool_swap)
+        
+        btn_clear_offset = QPushButton("Clear Tool Offsets")
+        btn_clear_offset.clicked.connect(self.clear_tool_offsets)
+        
+        action_layout.addWidget(btn_set_ref)
+        action_layout.addWidget(btn_manual_swap)
+        action_layout.addWidget(btn_clear_offset)
+        layout.addWidget(action_group)
+        
+        layout.addStretch()
+        self.tabs.addTab(tool_tab, "Tool Management")
+
+    def save_tool_name(self, index, text):
+        self.tool_dict[index] = text
+        self.settings.setValue(f"tool_name_{index}", text)
+        
+    def capture_probe_location(self):
+        self.probe_x = self.x_machine
+        self.probe_y = self.y_machine
+        self.settings.setValue("probe_x", self.probe_x)
+        self.settings.setValue("probe_y", self.probe_y)
+        self.lbl_probe_loc.setText(f"Probe Location: X: {self.probe_x:.3f}, Y: {self.probe_y:.3f}")
+        
+    def capture_tool_change_location(self):
+        self.tool_change_x = self.x_machine
+        self.tool_change_y = self.y_machine
+        self.settings.setValue("tool_change_x", self.tool_change_x)
+        self.settings.setValue("tool_change_y", self.tool_change_y)
+        self.lbl_change_loc.setText(f"Swap Position: X: {self.tool_change_x:.3f}, Y: {self.tool_change_y:.3f}")
+
+    def start_set_reference_tool(self):
+        self.execute_tool_change_sequence(1, is_reference_setup=True)
+
+    def start_manual_tool_swap(self):
+        # We prompt for which tool
+        pass # Implemented below
+
+    def show_tool_swap_prompt(self, tool_num):
+        tool_name = self.tool_dict.get(tool_num, f"Tool {tool_num}")
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Tool Swap Required")
+        msg.setText(f"Please insert Tool #{tool_num} ({tool_name}).\n\nClick OK when finished.")
+        msg.exec_()
+        self.current_tool = tool_num
+        self.send_next_generic_command()
+        
+    def show_attach_clip_prompt(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Attach Probe Clip")
+        msg.setText("Please attach the probe clip to the endmill and ensure the fixed probe is clear.\n\nClick OK to probe.")
+        msg.exec_()
+        self.send_next_generic_command()
+        
+    def process_tool_length_probe(self, z_val):
+        if not self.is_reference_set:
+            self.reference_z = z_val
+            self.is_reference_set = True
+            QMessageBox.information(self, "Reference Tool Set", f"Reference Tool (Tool 1) Z-height set to {z_val:.3f}")
+        else:
+            difference = z_val - self.reference_z
+            self.send_command(f"G43.1 Z{difference:.3f}")
+            self.log_to_console(f"INFO: New tool probed. Offset of {difference:.3f}mm applied (G43.1).")
+        
+        self.is_running_generic_queue = True
+        self.send_next_generic_command()
+
+    def execute_tool_change_sequence(self, tool_number, is_reference_setup=False):
+        self.generic_command_queue.clear()
+        self.generic_command_queue.append("G90") # Absolute
+        self.generic_command_queue.append("G53 G0 Z0") # Safe retract
+        if not is_reference_setup:
+            self.generic_command_queue.append(f"G53 G0 X{self.tool_change_x:.3f} Y{self.tool_change_y:.3f}")
+            self.generic_command_queue.append(f"PROMPT_TOOL_SWAP_{tool_number}")
+        
+        self.generic_command_queue.append(f"G53 G0 X{self.probe_x:.3f} Y{self.probe_y:.3f}")
+        self.generic_command_queue.append("PROMPT_ATTACH_CLIP")
+        self.generic_command_queue.append("PROBE_TOOL_LENGTH")
+        self.generic_command_queue.append("G53 G0 Z0") # Retract off probe
+        
+        if self.gcode_is_paused:
+            self.generic_command_queue.append("RESUME_JOB")
+        else:
+            self.generic_command_queue.append("END_QUEUE")
+            
+        self.is_running_generic_queue = True
+        self.send_next_generic_command()
+
+    def clear_tool_offsets(self):
+        self.reference_z = None
+        self.is_reference_set = False
+        self.send_gcode_command("G49")
+        QMessageBox.information(self, "Tool Offsets", "Tool length offsets cleared (G49).")
 
     def build_gcode_tab(self):
         gcode_tab = QWidget()
@@ -1648,6 +1803,8 @@ class MainWindow(QMainWindow):
             self.command_pending = False
             if self.is_advanced_probing:
                 self.send_next_probe_command()
+            elif getattr(self, 'is_tool_length_probing', False):
+                pass # Wait for PRB response before next generic command
             elif self.is_parking:
                 self.send_next_parking_command()
             elif self.is_running_generic_queue:
@@ -1738,6 +1895,13 @@ class MainWindow(QMainWindow):
                     # immediately process them without waiting for the 'ok'.
                     if len(self.probe_results) == 3:
                         self.send_next_probe_command()
+            elif getattr(self, 'is_tool_length_probing', False):
+                prb_match = self.re_prb.search(data)
+                if prb_match:
+                    self.is_tool_length_probing = False
+                    z_val = float(prb_match.group(3))
+                    # Wait for OK to clear then process
+                    QTimer.singleShot(100, lambda: self.process_tool_length_probe(z_val))
             elif self.is_probing: # Legacy single-probe logic
                 self.is_probing = False
                 self.probe_succeeded = True
@@ -1810,8 +1974,31 @@ class MainWindow(QMainWindow):
     def send_next_generic_command(self):
         if self.generic_command_queue:
             command = self.generic_command_queue[0]
-            if self.send_command(command):
+            
+            if command.startswith("PROMPT_TOOL_SWAP_"):
                 self.generic_command_queue.pop(0)
+                tool_num = int(command.split("_")[-1])
+                QTimer.singleShot(100, lambda: self.show_tool_swap_prompt(tool_num))
+            elif command == "PROMPT_ATTACH_CLIP":
+                self.generic_command_queue.pop(0)
+                QTimer.singleShot(100, self.show_attach_clip_prompt)
+            elif command == "PROBE_TOOL_LENGTH":
+                self.generic_command_queue.pop(0)
+                self.is_tool_length_probing = True
+                self.send_command("G38.2 Z-100 F50")
+            elif command == "RESUME_JOB":
+                self.generic_command_queue.pop(0)
+                self.is_running_generic_queue = False
+                self.gcode_is_paused = False
+                self.update_ui_states()
+                self.send_next_gcode_line()
+            elif command == "END_QUEUE":
+                self.generic_command_queue.pop(0)
+                self.is_running_generic_queue = False
+                self.log_to_console("INFO: Tool sequence complete.")
+            else:
+                if self.send_command(command):
+                    self.generic_command_queue.pop(0)
         else:
             self.is_running_generic_queue = False
             self.log_to_console("INFO: Generic command sequence complete.")
@@ -1956,22 +2143,13 @@ class MainWindow(QMainWindow):
             # This is a single command, safe to send directly.
             self.send_command("G28")
 
-    def load_gcode_file(self):
-        filepath, _ = QFileDialog.getOpenFileName(self, "Load G-Code", "", "*.gcode *.nc;;*.*")
-        if not filepath:
-            return
-
+    def parse_gcode_file(self, filepath):
         cleaned_lines = []
         with open(filepath, 'r') as f:
             for line in f:
-                # 1. Remove comments
-                line = self.re_comment_paren.sub('', line) # Remove (...) comments
-                line = line.split(';')[0]          # Remove ; comments
-
-                # 2. Normalize and Round Coordinates
-                # Find all "Letter+Number" patterns (e.g., G1, X1.234, F100)
+                line = self.re_comment_paren.sub('', line)
+                line = line.split(';')[0]
                 matches = self.re_word_value.findall(line)
-
                 if matches:
                     new_parts = []
                     for letter, value in matches:
@@ -1979,36 +2157,34 @@ class MainWindow(QMainWindow):
                         try:
                             val_float = float(value)
                             if letter in ['X', 'Y', 'Z', 'I', 'J', 'K']:
-                                # Force 3 decimal places for coordinates
                                 new_val = f"{val_float:.3f}"
                             elif letter in ['F']:
-                                # Feed rate: 3 decimals is safe
                                 if val_float.is_integer():
                                     new_val = f"{int(val_float)}"
                                 else:
                                     new_val = f"{val_float:.3f}"
                             elif letter in ['S']:
-                                # Spindle speed: Integer
                                 new_val = f"{int(val_float)}"
                             elif letter in ['G', 'M', 'T', 'P', 'H', 'D']:
-                                # Commands/Tools: Integer or specific decimal (e.g. G28.1)
                                 if val_float.is_integer():
                                     new_val = f"{int(val_float)}"
                                 else:
-                                    # Keep existing precision for command variants like G59.1
-                                    # but remove trailing zeros
                                     new_val = f"{val_float}".rstrip('0').rstrip('.')
                             else:
                                 new_val = value
-
                             new_parts.append(f"{letter}{new_val}")
                         except ValueError:
-                            pass # Should be caught by regex
-
+                            pass
                     if new_parts:
                         cleaned_lines.append(" ".join(new_parts))
+        return cleaned_lines
 
-        lines = cleaned_lines
+    def load_gcode_file(self, append_to_existing=False):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Load G-Code", "", "*.gcode *.nc;;*.*")
+        if not filepath:
+            return
+
+        lines = self.parse_gcode_file(filepath)
 
         # --- Pre-flight Check ---
         is_connected = bool(self.serial_connection and self.serial_connection.is_open)
@@ -2024,8 +2200,19 @@ class MainWindow(QMainWindow):
                 return # User cancelled, do not load the file
 
         # --- Proceed with loading the file ---
-        self.gcode_lines = lines
-        self.gcode_file_label.setText(os.path.basename(filepath))
+        if append_to_existing and hasattr(self, 'gcode_lines') and self.gcode_lines:
+            self.gcode_lines.extend(lines)
+            self.gcode_file_label.setText(self.gcode_file_label.text() + " + " + os.path.basename(filepath))
+        else:
+            self.gcode_lines = lines
+            self.gcode_file_label.setText(os.path.basename(filepath))
+
+        reply = QMessageBox.question(self, "Append File?", "Would you like to append another file to this job?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.load_gcode_file(append_to_existing=True)
+            return
         self.gcode_progress.setMaximum(len(self.gcode_lines))
         self.gcode_current_line = 0
         self.gcode_progress.setValue(0)
@@ -2169,6 +2356,26 @@ class MainWindow(QMainWindow):
 
     def start_gcode(self):
         if self.gcode_lines:
+            # Check for starting tool to confirm
+            start_tool = None
+            for line in self.gcode_lines[:50]:
+                tool = getattr(self, 'parse_tool_from_command', lambda x: None)(line)
+                if tool is not None:
+                    start_tool = tool
+                    break
+            
+            if start_tool is not None:
+                tool_name = self.tool_dict.get(start_tool, f"Tool {start_tool}")
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Question)
+                msg.setWindowTitle("Confirm Starting Tool")
+                msg.setText(f"This job requires Tool #{start_tool} ({tool_name}).\n\nPlease confirm this tool is currently loaded in the spindle. Is the probe clip detached?")
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                if msg.exec_() != QMessageBox.Yes:
+                    self.log_to_console("INFO: Job start cancelled by user during tool confirmation.")
+                    return
+                self.current_tool = start_tool
+
             # Reset table status (conceptually, though window only shows subset)
             self.probe_succeeded = self.is_manually_zeroed = False
             self.gcode_is_running, self.gcode_is_paused, self.gcode_current_line = True, False, 0
@@ -2354,16 +2561,33 @@ class MainWindow(QMainWindow):
         """Periodically called by a timer to request machine status."""
         self.send_command("?")
 
+    def parse_tool_from_command(self, cmd):
+        match = re.search(r'T(\d+)', cmd)
+        if match: return int(match.group(1))
+        match2 = re.search(r'MANUAL TOOL CHANGE TO T(\d+)', cmd)
+        if match2: return int(match2.group(1))
+        return None
+
     def send_next_gcode_line(self):
         if self.gcode_is_running and not self.gcode_is_paused:
             if self.gcode_current_line < len(self.gcode_lines):
-                # Simple Ping-Pong Flow Control:
-                # 1. Check if we are waiting for an 'ok' from a previous command.
-                # This ensures we never overflow the buffer and eliminates timing issues with status reports.
                 if self.command_pending:
                     return
 
                 cmd = self.gcode_lines[self.gcode_current_line]
+                
+                requested_tool = self.parse_tool_from_command(cmd)
+                if requested_tool is not None:
+                    if requested_tool == self.current_tool:
+                        self.log_to_console(f"INFO: Tool {requested_tool} already loaded. Skipping tool change.")
+                    else:
+                        self.log_to_console(f"INFO: Tool swap required: Tool {requested_tool}. Pausing stream.")
+                        self.gcode_is_paused = True
+                        self.update_ui_states()
+                        self.gcode_current_line += 1
+                        self.execute_tool_change_sequence(requested_tool)
+                        return
+                
                 if self.send_command(cmd):
                     self.gcode_line_sent.emit(self.gcode_current_line)
                     self.gcode_current_line += 1
